@@ -1,0 +1,14 @@
+pycocotools>=2.0.0
+albumentations>=0.3.0
+
+torchvision
+torch>=1.1.0
+numpy
+torchnet
+tensorboardX
+joblib==0.13.2
+
+--trusted-host www.simpleitk.org
+--find-links http://www.simpleitk.org/SimpleITK/resources/software.html
+SimpleITK
+pydicom>=1.0.2
