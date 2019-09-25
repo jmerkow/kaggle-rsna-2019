@@ -47,7 +47,7 @@ class RSNA2019Metric(object):
 
     @property
     def mean(self):
-        df = self.scorecard
+        df = self.get_df()
         loss_cols = [c for c in list(df) if c.startswith('loss')]
         return df[loss_cols].mean().to_dict()
 

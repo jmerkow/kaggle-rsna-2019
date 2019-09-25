@@ -1,4 +1,5 @@
 import numpy as np
+import six
 from albumentations import (
     HorizontalFlip,
     VerticalFlip,
@@ -7,7 +8,7 @@ from albumentations import (
     ElasticTransform,
     GridDistortion,
     OpticalDistortion,
-    RandomSizedCrop,
+    RandomCrop,
     OneOf,
     RandomBrightness,
     RandomGamma,
@@ -19,7 +20,43 @@ from albumentations import (
     PadIfNeeded,
     Lambda,
 )
+from albumentations.core.transforms_interface import ImageOnlyTransform
 from albumentations.pytorch import ToTensor
+
+from kaggle_lib.dicom import windows_as_channels
+
+
+class ChannelWindowing(ImageOnlyTransform):
+    """
+    """
+
+    def __init__(
+            self, windows=('min_max',),
+            force_rgb=True,
+            min_pixel_value=0, max_pixel_value=255,
+            always_apply=False, p=1.0
+    ):
+        super(ChannelWindowing, self).__init__(always_apply, p)
+
+        if isinstance(windows, six.string_types):
+            windows = [windows]
+
+        if force_rgb and len(windows) == 1:
+            windows = windows * 3
+
+        if force_rgb and len(windows) != 3:
+            raise ValueError('Wrong number of channels for force rgb! Must be 1 or 3! got {}'.format(len(windows)))
+
+        self.windows = tuple(windows)
+        self.force_rgb = force_rgb
+        self.min_pixel_value = min_pixel_value
+        self.max_pixel_value = max_pixel_value
+
+    def apply(self, image, **params):
+        return windows_as_channels(image, self.windows, self.min_pixel_value, self.max_pixel_value)
+
+    def get_transform_init_args_names(self):
+        return ("windows", "force_rgb", "min_pixel_value", "max_pixel_value")
 
 
 def force_rgb(data):
@@ -51,8 +88,9 @@ def make_augmentation(data_shape,
                       color=None,
                       deform=None,
                       rand_crop=None,
-                      max_value=None,
-                      min_value=None,
+                      windows=('soft_tissue',),
+                      windows_force_rgb=True,
+                      max_value=1.0
                       ):
     transforms = []
 
@@ -98,16 +136,21 @@ def make_augmentation(data_shape,
 
     transforms.append(PadIfNeeded(min_height=data_shape[1], min_width=data_shape[0]))
 
-    c_crop = CenterCrop(height=data_shape[1], width=data_shape[0])
     if rand_crop:
         if not isinstance(rand_crop, dict):
-            rand_crop = {'min_max_height': rand_crop}
-        transforms.append(OneOf(
-            [RandomSizedCrop(height=data_shape[1], width=data_shape[0], **rand_crop),
-             c_crop],
-            p=1))
-    else:
-        transforms.append(c_crop)
+            rand_crop = {'p': rand_crop}
+        rand_crop.setdefault('p', 1.0)
+        r_crop = RandomCrop(height=data_shape[1], width=data_shape[0], **rand_crop)
+        transforms.append(r_crop)
+
+        # rand_crop.setdefault('scale', (0, 0))
+        # rand_crop.setdefault('ratio', (1.0, 1.0))
+        # r_crop = RandomResizedCrop(height=data_shape[1], width=data_shape[0], **rand_crop)
+        # transforms.append(r_crop)
+
+    c_crop = CenterCrop(height=data_shape[1], width=data_shape[0])
+    transforms.append(PadIfNeeded(min_height=data_shape[1], min_width=data_shape[0]))
+    transforms.append(c_crop)
 
     if color:
         oneof = []
@@ -127,13 +170,21 @@ def make_augmentation(data_shape,
 
         transforms.append(OneOf(oneof, p=color_p))
 
-    if max_value is not None:
-        transforms.append(ToFloat(max_value=max_value))
+    transforms.append(ChannelWindowing(
+        windows=windows,
+        force_rgb=windows_force_rgb,
+    ))
+
+    transforms.append(ToFloat(max_value=max_value))
 
     return Compose(transforms)
 
 
-def make_transforms(data_shape, resize=None, max_value=None, force_rgb=False, **kwargs):
+def make_transforms(data_shape, resize=None,
+                    windows=('soft_tissue',),
+                    windows_force_rgb=True,
+                    max_value=1.0,
+                    **kwargs):
     transforms = []
     if resize == 'auto':
         resize = data_shape
@@ -141,8 +192,12 @@ def make_transforms(data_shape, resize=None, max_value=None, force_rgb=False, **
         transforms.append(Resize(*resize))
     transforms.append(CenterCrop(height=data_shape[1], width=data_shape[0]))
 
-    if max_value is not None:
-        transforms.append(ToFloat(max_value=max_value))
+    transforms.append(ChannelWindowing(
+        windows=windows,
+        force_rgb=windows_force_rgb,
+    ))
+
+    transforms.append(ToFloat(max_value=max_value))
 
     return Compose(transforms)
 

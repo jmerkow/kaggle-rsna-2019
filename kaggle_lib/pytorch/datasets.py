@@ -3,13 +3,10 @@ from __future__ import absolute_import, print_function
 import os
 
 import SimpleITK as sitk
-import numpy as np
 import pandas as pd
 import torch
 from albumentations.core.composition import BaseCompose
 from torchvision.datasets.vision import VisionDataset
-
-from .augmentation import force_rgb
 
 
 class RSNA2019Dataset(VisionDataset):
@@ -51,14 +48,8 @@ class RSNA2019Dataset(VisionDataset):
     @staticmethod
     def read_image(filename):
 
-        image = sitk.GetArrayFromImage(sitk.ReadImage(filename)).transpose(1, 2, 0).astype('float32')
+        image = sitk.GetArrayFromImage(sitk.ReadImage(filename)).squeeze().astype('float32')
 
-        # hard coded for now
-        image += 1024.
-        image /= (1024 + 2000.)
-        image *= 255
-        image = np.minimum(image, 255)
-        image = np.maximum(image, 0)
 
         return image
 
@@ -75,8 +66,6 @@ class RSNA2019Dataset(VisionDataset):
         path = image_row['filepath']
 
         img = self.read_image(os.path.join(self.root, path))
-        if self.convert_rgb:
-            img = force_rgb(img)
         target = [(image_row[self.label_map[c]]).astype('float32') for c in self.class_order]
 
         output = dict(image=img)
