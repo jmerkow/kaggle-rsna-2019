@@ -1,53 +1,91 @@
 import torch
 from torch import nn
 
-score_loss_types = {'bce': torch.nn.BCEWithLogitsLoss}
+
+class FocalLoss(nn.Module):
+    loss_func = nn.BCELoss
+
+    def __init__(self, alpha=1, gamma=2, reduction='mean', **kwargs):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.bce_loss = self.loss_func(reduction='none', **kwargs)
+
+    def forward(self, inputs, targets):
+        BCE_loss = self.bce_loss(inputs, targets)
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+        if self.reduction == 'mean':
+            return torch.mean(F_loss)
+        elif self.reduction == 'sum':
+            return torch.sum(F_loss)
+        elif self.reduction == 'none':
+            return F_loss
+
+        raise NotImplementedError('bad reduction type')
+
+
+class FocalWithLogitsLoss(FocalLoss):
+    loss_func = nn.BCEWithLogitsLoss
 
 
 class Criterion(nn.Module):
-    loss_types = {
-        'bce': torch.nn.BCEWithLogitsLoss,
-        'ce': torch.nn.CrossEntropyLoss,
-    }
+    loss_types = [
+        {
+            'bce': torch.nn.BCELoss,
+            'ce': torch.nn.NLLLoss,
+            'focal': FocalLoss,
+        },
+        {
+            'bce': torch.nn.BCEWithLogitsLoss,
+            'ce': torch.nn.CrossEntropyLoss,
+            'focal': FocalWithLogitsLoss
+        }]
 
-    def get_loss(self, type, *args, **loss_params):
-        klass = self.loss_types[type]
+    def get_loss(self, type, logits=True, **loss_params):
+        klass = self.loss_types[int(logits)][type]
         if 'pos_weight' in loss_params:
+            if not logits or type == 'ce':
+                raise NotImplementedError('pos_weight not implemented for this loss')
             pos_weight = loss_params['pos_weight']
-
             if pos_weight is not None and not isinstance(pos_weight, torch.Tensor):
                 pos_weight = torch.tensor(pos_weight).float()
                 loss_params['pos_weight'] = pos_weight
+        loss_params['reduction'] = 'none'
         return klass(**loss_params)
 
-    def __init__(self, loss_params, loss_reduction='mean', **defaults):
+    def __init__(self, loss_weights=None, reduction='mean', type='bce', logits=True, **loss_params):
         super().__init__()
+        assert reduction in ['none', 'sum', 'mean'], "bad reduction type"
+        assert type in self.loss_types[logits], "bad loss type"
+
+        if loss_weights is not None and not isinstance(loss_weights, torch.Tensor):
+            loss_weights = torch.tensor(loss_weights, requires_grad=False).float()
+
         self.raw_loss = None
+        self.reduction = reduction
+        self.loss_weights = loss_weights
+        self.register_buffer('loss_weights_const', self.loss_weights)
+        self.criteria = self.get_loss(type=type, logits=logits, **loss_params)
 
-        real_params = {}
-        self.targets = {}
-        self.loss_weights = {}
-        for name, lp in loss_params.items():
-            temp = defaults.copy()
-            temp.update(lp)
-            self.targets[name] = temp.pop('target', name)
-            self.loss_weights[name] = temp.pop('loss_weight', 1)
-            real_params[name] = temp
+    def __call__(self, scores, targets):
 
-        if loss_reduction == 'mean':
-            norm = sum(self.loss_weights.values())
-            self.loss_weights = {name: lw / norm for name, lw in self.loss_weights.items()}
-        self.losses = nn.ModuleDict({name: self.get_loss(**lp) for name, lp in real_params.items()})
+        batch_size = len(scores)
+        raw_loss = self.criteria(scores, targets)
+        if self.loss_weights is not None:
+            weighted_loss = raw_loss * self.loss_weights_const
+        else:
+            weighted_loss = raw_loss
 
-    def forward(self, output_dict, targets):
-        self.raw_loss = {}  # so we can capture it if we want
-        loss = 0
-        for name, output in output_dict.items():
-            if name not in self.losses:
-                continue
-            target = targets[self.targets[name]]
-            lw = self.loss_weights[name]
-            temp = self.losses[name](output, target)
-            self.raw_loss[name] = temp.detach()
-            loss += lw * temp
+        if self.reduction == 'none':
+            loss = weighted_loss.sum(dim=1)
+            self.raw_loss = raw_loss.detach()
+        else:
+            loss = weighted_loss.sum()
+            self.raw_loss = raw_loss.sum(dim=1).detach()
+
+        if self.reduction == 'mean':
+            loss /= batch_size
+
         return loss

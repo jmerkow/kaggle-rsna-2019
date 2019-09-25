@@ -15,12 +15,12 @@ from torch.utils.data import DataLoader
 from torchnet.meter import AverageValueMeter
 from tqdm import tqdm
 
-# from . import metrics as _metrics
 from .augmentation import make_augmentation, make_transforms, get_preprocessing
 from .datacatalog import get_dataset, dataset_map, datacatalog, get_csv_file
 from .get_model import get_model
 from .loss import Criterion
 from .lr_scheduler import get_scheduler
+from .metrics import RSNA2019Metric
 from .saver import Saver
 from .summary import TensorboardSummary
 from .sync_batchnorm import convert_model, patch_replication_callback
@@ -45,12 +45,13 @@ class ClassifierTrainer(object):
         'random': {'seed': None, 'backend_deterministic': False, 'backend_benchmark': False},
         'model': {
             'encoder': 'se_resnext101_32x4d',
-            'tasks': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
+            'nclasses': 6,
             'encoder_weights': 'imagenet',
             'activation': 'sigmoid',
             'model_dir': '/data/pretrained_weights/',
             'weights': None,
-            'classifier_params': {'type': 'basic'}
+            'classifier_params': {'type': 'basic'},
+            'tasks': ('cls',)
         },
         'data': {
             'dataset': 'rsna2019-kaggle-stage1',
@@ -65,10 +66,11 @@ class ClassifierTrainer(object):
             'batch_size': 32,
             'max_images_per_card': None,
             'num_workers': 8,
-            'data_shape': (512, 512),
+            'data_shape': (224, 224),
             'epochs': 50,
             'data_root': '/data/',
             'augmentation': {'resize': 'auto'},
+            'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
             'filter': {}
 
         },
@@ -84,9 +86,10 @@ class ClassifierTrainer(object):
         },
 
         'metric': {
-            'metrics': (),
-            'best_seg_metric': 'loss',
-            'score_bigger_is_better': False
+            'best_metric': 'loss',
+            'score_bigger_is_better': False,
+            'loss_weights': [1, 1, 1, 1, 1, 2]
+
         },
         'other': {
             'train_log_every': 100,
@@ -161,7 +164,10 @@ class ClassifierTrainer(object):
             checkpoint = torch.load(weights_file)
             self.model.load_state_dict(checkpoint['state_dict'])
 
+        self.is_multi_task = self.model.is_multi_task
+
         logger.info("model: %s", self.model.name)
+        logger.info("model tasks: %s", self.model.tasks)
 
     def _setup_data(self, **data_params):
 
@@ -170,7 +176,7 @@ class ClassifierTrainer(object):
         self.dataset = dataset = data_params['dataset']
         self.epochs = data_params['epochs']
         self.data_root = data_params['data_root']
-        self.tasks = self.model.tasks
+        self.classes = data_params['classes']
         filter_params = data_params['filter']
         num_workers = data_params['num_workers']
 
@@ -221,8 +227,7 @@ class ClassifierTrainer(object):
                                                         random_state=random_split_state,
                                                         stratified=random_split_stratified)
             logger.info(
-                "Using Random Split! # train: %d, # val: %d, n_splits: %d, fold: %d, random_state:: %s",
-                len(train_img_ids), len(val_img_ids), n_splits, fold, str(random_split_state))
+                "Using Random Split! n_splits: %d, fold: %d, random_state: %s", n_splits, fold, str(random_split_state))
 
         apply_filter_to_val = filter_params.pop('apply_to_val', True)
 
@@ -233,12 +238,14 @@ class ClassifierTrainer(object):
 
         train_dataset = get_dataset(train_catalog, self.data_root, transforms=self.train_transforms,
                                     preprocessing=get_preprocessing(self.model_preprocessing),
-                                    img_ids=train_img_ids,
+                                    img_ids=train_img_ids, class_order=self.classes,
                                     **filter_params)
         val_dataset = get_dataset(val_catalog, self.data_root, transforms=self.val_transforms,
                                   preprocessing=get_preprocessing(self.model_preprocessing),
-                                  img_ids=val_img_ids,
+                                  img_ids=val_img_ids, class_order=self.classes,
                                   **val_filter_params)
+
+        logger.info("Num Images, train: %d, val: %d", len(train_dataset), len(val_dataset))
 
         with open(os.path.join(self.workdir, 'training_images.yml'), 'w') as f:
             print(yaml.safe_dump({'train': list(train_dataset.ids.values()),
@@ -254,7 +261,7 @@ class ClassifierTrainer(object):
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                                        num_workers=num_workers)
         if val_dataset is not None:
-            self.val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4, drop_last=False)
+            self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False)
         else:
             self.val_loader = None
 
@@ -273,12 +280,9 @@ class ClassifierTrainer(object):
         plateau_scheduler_params = optimization_params.pop('plateau_scheduler', None)
 
         stop_on_plateau_params = optimization_params.pop('stopper', None)
-        defaults = optimization_params.pop('loss')
-        loss_params = {}
-        for name in self.tasks:
-            loss_params[name] = defaults.pop(name, {})
+        loss_params = optimization_params.pop('loss')
 
-        self.criterion = Criterion(loss_params, **defaults)
+        self.criterion = Criterion(**loss_params).cuda()
 
         self.norm_loss_for_step = optimization_params.pop('norm_loss_for_step', True)
 
@@ -338,15 +342,12 @@ class ClassifierTrainer(object):
 
     def _setup_metrics(self, **metric_params):
         logger.info('====METRICS====')
-        seg_metrics = metric_params.pop('metrics')
-        self.score_bigger_is_better = metric_params.pop('score_bigger_is_better')
-
-        # self.val_metrics = _metrics.Metric(thresholds=thresholds)
-
-        logger.info('METRICS')
+        self.score_bigger_is_better = metric_params.pop('score_bigger_is_better', False)
+        self.best_metric = metric_params.pop('best_metric')
+        self.val_metrics = RSNA2019Metric(class_order=self.classes, **metric_params)
 
     def _setup_other(self, **other_params):
-        logger.info('====METRICS====')
+        logger.info('====OTHER====')
         self.train_log_every = min(other_params['train_log_every'], len(self.train_loader))
         self.visualize_every = min(other_params['visualize_every'], len(self.train_loader))
         self.visual_count = other_params['visual_count']
@@ -373,24 +374,18 @@ class ClassifierTrainer(object):
         self.optimizer.zero_grad()
         last_step = 0
         for i, sample in enumerate(tbar):
-
+            step = i + num_img_tr * epoch
             metrics = {}
-
             for lri, lr in enumerate([p['lr'] for p in self.optimizer.param_groups]):
                 metrics['lr-{}'.format(lri)] = lr
 
             image = sample['image'].cuda()
-            targets = {cl: sample[cl].cuda() for cl in self.tasks}
-            step = i + num_img_tr * epoch
-
-            # print(targets)
-
+            target = sample['target'].cuda()
             scores = self.model(image)
-            loss = self.criterion(scores, targets)
+            loss = self.criterion(scores, target)
             raw_loss = self.criterion.raw_loss
-
             metrics['loss'] = loss.cpu().detach().numpy()
-            metrics.update({'loss-' + name: l.cpu().numpy() for name, l in raw_loss.items()})
+            metrics.update({'loss-' + name: l.cpu().numpy() for name, l in zip(self.classes, raw_loss)})
 
             # metrics.update({metric_fn.__name__: metric_fn(score, gt).cpu().detach().numpy()
             #                 for metric_fn in self.score_metrics})
@@ -434,66 +429,31 @@ class ClassifierTrainer(object):
         return logs
 
     def validation(self, epoch):
-        self.model.eval()
 
         tbar = tqdm(self.val_loader, desc='Epoch {} Validate'.format(epoch), file=sys.stdout)
-        class_scores = []
-        class_gts = []
-        meters = defaultdict(lambda: AverageValueMeter())
-        logs = {}
-
         self.val_metrics.reset()
-        for i, sample in enumerate(tbar):
-            image = sample['image'].cuda()
-            target = sample['mask'].cuda()
-            gt = sample['gt'].cuda()
-            age = sample['age'].cuda()
-            sex = sample['sex'].cuda()
+        self.model.eval()
+        with torch.no_grad():
+            for i, sample in enumerate(tbar):
+                metrics = {}
 
-            with torch.no_grad():
-                segs = self.model(image, age=age, sex=sex)
-            scores = None
-            if self.has_classifier:
-                segs, scores = segs
+                image = sample['image'].cuda()
+                target = sample['target'].cuda()
+                scores = self.model(image)
+                # loss = self.criterion(scores, target)
+                # raw_loss = self.criterion.raw_loss
+                # metrics['loss'] = loss.cpu().detach().numpy()
+                # metrics.update({'loss-' + name: l.cpu().numpy() for name, l in zip(self.classes, raw_loss)})
+                self.val_metrics.add_batch(scores, target, sample=sample)
 
-            metrics = {}
-            loss = self.loss_seg(segs, target)
-            metrics[self.loss_seg.__name__] = loss.cpu().detach().numpy()
-            metrics.update({metric_fn.__name__: metric_fn(segs, target).cpu().detach().numpy()
-                            for metric_fn in self.seg_metrics})
+                # for name, value in metrics.items():
+                #     meters[name].add(value)
+                #     logs[name] = meters[name].mean
+                # s = self._format_logs(logs)
+                # tbar.set_postfix_str(s)
 
-            if self.has_classifier:
-                loss_score = self.loss_score(scores, gt)
-                class_scores.append(scores.detach())
-                class_gts.append(gt.detach())
-                metrics[self.loss_score.__name__] = loss_score.cpu().detach().numpy()
-                loss += loss_score * self.score_loss_weight
-                # score metrics don't make sense if batch size == 1...
-                # metrics.update({metric_fn.__name__: metric_fn(score, gt).cpu().detach().numpy()
-                #                 for metric_fn in self.score_metrics})
+        logs = self.val_metrics.mean
 
-            self.val_metrics.add_batch(sample, segs, scores=scores)
-            metrics['loss'] = loss.cpu().detach().numpy()
-            for name, value in metrics.items():
-                meters[name].add(value)
-                logs[name] = meters[name].mean
-            s = self._format_logs(logs)
-            tbar.set_postfix_str(s)
-
-        score_metrics = {}
-        if self.has_classifier:
-            score_metrics = {metric_fn.__name__:
-                                 metric_fn(torch.cat(class_scores, 0), torch.cat(class_gts, 0)).cpu().detach().numpy()
-                             for metric_fn
-                             in
-                             self.score_metrics}
-
-        for name, value in score_metrics.items():
-            meters[name].add(value)
-            logs[name] = meters[name].mean
-
-        best = self.val_metrics.compute_best_thresholds()
-        logs.update(best)
 
         for name, value in logs.items():
             self.summary.add_scalar('val-epoch/{}'.format(name), value, epoch + 1)
@@ -502,7 +462,7 @@ class ClassifierTrainer(object):
         logger.info('[Epoch: %d, numImages: %5d, Thresholds: %d] Validation scores: %s', epoch + 1,
                     i + 1, len(self.val_metrics.rows), s)
         logs['scorecard'] = self.val_metrics.get_rows()
-        logs['best'] = best
+        # logs['best'] = best
         self.val_metrics.reset()
         return logs
 
@@ -510,9 +470,6 @@ class ClassifierTrainer(object):
 
         epochs = self.epochs or epochs
         self.epochs = epochs
-
-        for lri, lr in enumerate([p['lr'] for p in self.optimizer.param_groups]):
-            print('lr-{}={}'.format(lri, lr))
 
         if self.sync_bn:
             logger.info('syncing batch norm!')
@@ -526,7 +483,7 @@ class ClassifierTrainer(object):
         for epoch in range(self.start_epoch, self.epochs):
             train_logs = self.step_epoch(epoch)
             val_logs = self.validation(epoch)
-            curr_score = val_logs[self.best_seg_metric]
+            curr_score = val_logs[self.best_metric]
 
             if prev_score is None:
                 logger.info("Prev Best Score: None, Current Score: %.5f", curr_score)
@@ -554,7 +511,7 @@ class ClassifierTrainer(object):
         scorecard = val_logs.pop('scorecard', [])
         state = {'epoch': epoch, 'state_dict': self.model.module.state_dict(),
                  'optimizer': self.optimizer.state_dict(),
-                 'score_metric': self.best_seg_metric,
+                 'score_metric': self.best_metric,
                  'score': curr_score,
                  'val_metrics': val_logs,
                  'scorecard': scorecard,

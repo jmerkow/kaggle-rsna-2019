@@ -8,6 +8,11 @@ dataset_map = {
         'val': None,
         'test': 'rsna2019-stage1-test',
         'classes': ['any', 'edh', 'iph', 'ivh', 'sah', 'sdh']},
+    'rsna2019-stage1-debug': {
+        'train': 'rsna2019-stage1-train-debug',
+        'val': None,
+        'test': None,
+        'classes': ['any', 'edh', 'iph', 'ivh', 'sah', 'sdh']},
 
 }
 
@@ -20,6 +25,11 @@ datacatalog = {
     'rsna2019-stage1-test': {
         "img_dir": 'rsna-intracranial-hemorrhage-detection/stage_1_test_images/',
         'csv_file': 'rsna-intracranial-hemorrhage-detection/stage1-test-headers.csv'
+    },
+
+    'rsna2019-stage1-train-debug': {
+        "img_dir": 'rsna-intracranial-hemorrhage-detection/stage_1_train_images/',
+        'csv_file': 'rsna-intracranial-hemorrhage-detection/stage_1_train_with_headers_debug.csv'
     },
 
     None: {}
