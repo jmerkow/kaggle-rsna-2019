@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 
 class Saver(object):
 
-    def __init__(self, workdir='.'):
+    def __init__(self, workdir='.', subdir='checkpoints'):
         self.workdir = os.path.abspath(workdir)
-        self.directory = os.path.join(self.workdir, 'checkpoints')
+        self.directory = os.path.join(self.workdir, subdir)
         logger.info("saver at '%s'", self.directory)
         if not os.path.exists(self.directory):
             os.makedirs(self.directory)
