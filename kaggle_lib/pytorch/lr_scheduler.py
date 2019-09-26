@@ -166,7 +166,7 @@ proxy_types = {
 
 
 def get_scheduler(optimizer, schedulers, steps_per_epoch=1,
-                  change_epochs=None, scale_params=True,
+                  change_epochs=None, scale_params=False,
                   mult_scale_params=None,
                   div_scale_params=None):
     mult_scale_params = mult_scale_params or ['max_epoch', 'step_size', 'milestones', 'T_max', 'patience', 'cooldown',
@@ -203,11 +203,12 @@ def get_scheduler(optimizer, schedulers, steps_per_epoch=1,
     schedulers_ = []
     for p in schedulers:
         klass = proxy_types[p.pop('type', 'warm')]
-        p.update(get_default_args(klass))
-        logger.info('params before: %s', str(p))
-        p = _convert_params(p, steps_per_epoch, scale_params=scale_params)
-        logger.info('params after scaling: %s', str(p))
-        schedulers_.append(klass(optimizer, **p))  # warm default is for backwards_compat
+        params = get_default_args(klass)
+        params.update(p)
+        logger.info('params before: %s', str(params))
+        params = _convert_params(params, steps_per_epoch, scale_params=scale_params)
+        logger.info('params after scaling: %s', str(params))
+        schedulers_.append(klass(optimizer, **params))  # warm default is for backwards_compat
 
     print(schedulers_)
     scheduler = MultiTypeLRScheduler(optimizer, schedulers=schedulers_, change_epochs=change_epochs)

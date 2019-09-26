@@ -54,7 +54,7 @@ class ClassifierTrainer(object):
             'tasks': ('cls',)
         },
         'data': {
-            'dataset': 'rsna2019-kaggle-stage1',
+            'dataset': 'rsna2019-stage1',
             'load_options': {},  ## will use this for doing cool stuff with channels etc
             'sampler': None,
             'random_split': True,
@@ -78,7 +78,7 @@ class ClassifierTrainer(object):
             'optimizer': {'type': 'adam', },
             'base_lr': 1e-5,
             'classifier_lr_mult': 10,
-            'lr_scheduler': {'step_on_iter': False, 'scale_params': True},
+            'lr_scheduler': {'step_on_iter': False, 'scale_params': True, 'pass_epoch': False},
             'norm_loss_for_step': True,
             'plateau_scheduler': None,
             'loss': {'type': 'bce'},
@@ -99,6 +99,10 @@ class ClassifierTrainer(object):
         }
     }
 
+    model_filename_format = "model_step{:03d}.pth.tar"
+    model_glob_str = 'model_step(?P<step>\d*).pth.tar'
+    model_subdir = 'checkpoints'
+
     def _is_metric_better(self, curr_score, prev_score):
         if self.score_bigger_is_better:
             return curr_score > prev_score
@@ -113,7 +117,7 @@ class ClassifierTrainer(object):
 
             logger.info("Workdir: %s", self.workdir)
         self.summary = TensorboardSummary(self.workdir)
-        self.saver = Saver(self.workdir)
+        self.saver = Saver(self.workdir, subdir=self.model_subdir)
 
         ## TODO: Figure out!
         self.start_epoch = 0
@@ -302,6 +306,7 @@ class ClassifierTrainer(object):
                                               for k, v in self.plateau_scheduler.state_dict().items())
 
         self.lr_scheduler = None
+        self.scheduler_pass_epoch = lr_scheduler_params_.pop('pass_epoch', False)
         if lr_scheduler_params_ is not None:
             lr_scheduler_params = {}
             if 'schedulers' not in lr_scheduler_params_:
@@ -394,18 +399,20 @@ class ClassifierTrainer(object):
                 loss *= 1. / self.step_size
 
             loss.backward()
-            if (i + 1) % self.step_size:
+            if (i + 1) % self.step_size == 0:
                 last_step = i
+                epoch_dec = epoch + i / self.steps_per_epoch / self.step_size
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 if self.lr_scheduler is not None and self.lr_step_on_iter:
-                    self.lr_scheduler.step()
+                    step_epoch = epoch_dec if self.scheduler_pass_epoch else None
+                    self.lr_scheduler.step(step_epoch)
 
             for name, value in metrics.items():
                 epoch_meters[name].add(value)
                 intra_epoch_meters[name].add(value)
                 logs[name] = epoch_meters[name].mean
-                if (i + 1) % self.train_log_every:
+                if (i + 1) % self.train_log_every == 0:
                     self.summary.add_scalar('train/{}'.format(name), intra_epoch_meters[name].mean, step)
                     intra_epoch_meters[name].reset()
 
@@ -417,7 +424,8 @@ class ClassifierTrainer(object):
             self.optimizer.step()
             self.optimizer.zero_grad()
             if self.lr_scheduler is not None and self.lr_step_on_iter:
-                self.lr_scheduler.step()
+                step_epoch = epoch if self.scheduler_pass_epoch else None
+                self.lr_scheduler.step(step_epoch)
 
         for name, value in logs.items():
             self.summary.add_scalar('train-epoch/mean-{}'.format(name), value, epoch + 1)
@@ -425,7 +433,8 @@ class ClassifierTrainer(object):
         logger.info('[Epoch: %d, numImages: %5d] Train scores: %s', epoch + 1, i * self.step_size + image.data.shape[0],
                     s)
         if self.lr_scheduler is not None and not self.lr_step_on_iter:
-            self.lr_scheduler.step()
+            step_epoch = epoch if self.scheduler_pass_epoch else None
+            self.lr_scheduler.step(step_epoch)
         return logs
 
     def validation(self, epoch):
@@ -451,10 +460,7 @@ class ClassifierTrainer(object):
                 #     logs[name] = meters[name].mean
                 # s = self._format_logs(logs)
                 # tbar.set_postfix_str(s)
-
         logs = self.val_metrics.mean
-
-
         for name, value in logs.items():
             self.summary.add_scalar('val-epoch/{}'.format(name), value, epoch + 1)
 
@@ -519,7 +525,7 @@ class ClassifierTrainer(object):
                  'test_transforms': A.to_dict(self.test_transforms),
                  'model_params': self.model_params,
                  }
-        self.saver.save_checkpoint(filename="model_step{:03d}.pth.tar".format(epoch), is_best=is_best, **state)
+        self.saver.save_checkpoint(filename=self.model_filename_format.format(epoch), is_best=is_best, **state)
 
     def lr_sim(self):
         print('WARNING!! you need to re-create this trainer, running this messed with your LR rates')
@@ -528,15 +534,27 @@ class ClassifierTrainer(object):
 
         iters = []
         lrs = []
+        epoch_decs = []
         iter_ = 0
         for epoch in range(self.start_epoch, self.epochs):
-            for step in range(self.steps_per_epoch):
-                iters.append(iter_)
-                lrs.append([p['lr'] for p in self.optimizer.param_groups])
-                if self.lr_step_on_iter:
-                    self.lr_scheduler.step()
-                iter_ += 1
-            if not self.lr_step_on_iter:
-                self.lr_scheduler.step()
+            for i in range(self.steps_per_epoch):
 
-        return np.array(iters), np.array(lrs)
+                epoch_dec = epoch + i / (self.steps_per_epoch)
+                iters.append(iter_)
+                epoch_decs.append(epoch_dec)
+                lrs.append([p['lr'] for p in self.optimizer.param_groups])
+
+                if (i + 1) % self.step_size == 0:
+                    last_step = i
+                    # epoch_dec = epoch + i / self.steps_per_epoch / self.step_size
+                    step_epoch = epoch_dec if self.scheduler_pass_epoch else None
+                    if self.lr_scheduler is not None and self.lr_step_on_iter:
+                        self.lr_scheduler.step(step_epoch)
+                        
+                iter_ += 1
+
+            if not self.lr_step_on_iter:
+                step_epoch = step_epoch if self.scheduler_pass_epoch else None
+                self.lr_scheduler.step(step_epoch)
+
+        return np.array(iters), np.array(lrs), np.array(epoch_decs)

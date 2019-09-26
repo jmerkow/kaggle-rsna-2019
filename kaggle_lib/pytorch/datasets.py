@@ -2,11 +2,27 @@ from __future__ import absolute_import, print_function
 
 import os
 
-import SimpleITK as sitk
+import h5py
+import numpy as np
 import pandas as pd
 import torch
 from albumentations.core.composition import BaseCompose
 from torchvision.datasets.vision import VisionDataset
+
+from ..dicom import sitk_read_image
+
+
+def h5_read_image(fn):
+    with h5py.File(fn, 'r') as f:
+        array = np.array(f['data']).astype('float32')
+
+    return array
+
+
+readers = {
+    'dcm': sitk_read_image,
+    'h5': h5_read_image,
+}
 
 
 class RSNA2019Dataset(VisionDataset):
@@ -22,6 +38,7 @@ class RSNA2019Dataset(VisionDataset):
 
     def __init__(self, root, csv_file, transform=None, target_transform=None, transforms=None,
                  convert_rgb=True, preprocessing=None, img_ids=None,
+                 reader='h5',
                  class_order=None, **filter_params):
         super(RSNA2019Dataset, self).__init__(root, transforms, transform, target_transform)
 
@@ -41,17 +58,14 @@ class RSNA2019Dataset(VisionDataset):
         self.convert_rgb = convert_rgb
         self.preprocessing = preprocessing
 
+        assert reader in readers, 'bad reader type'
+
+        self.image_ext = reader
+        self.read_image = readers[reader]
+
     def apply_filter(self, img_ids, **filter_params):
         # place holder for now
         return img_ids
-
-    @staticmethod
-    def read_image(filename):
-
-        image = sitk.GetArrayFromImage(sitk.ReadImage(filename)).squeeze().astype('float32')
-
-
-        return image
 
     def __getitem__(self, index):
         """
@@ -64,6 +78,7 @@ class RSNA2019Dataset(VisionDataset):
         img_id = self.ids[index]
         image_row = self.data.loc[img_id]
         path = image_row['filepath']
+        path = os.path.splitext(path)[0] + '.' + self.image_ext
 
         img = self.read_image(os.path.join(self.root, path))
         target = [(image_row[self.label_map[c]]).astype('float32') for c in self.class_order]
