@@ -78,17 +78,17 @@ class ClassifierTrainer(object):
             'optimizer': {'type': 'adam', },
             'base_lr': 1e-5,
             'classifier_lr_mult': 10,
-            'lr_scheduler': {'step_on_iter': False, 'scale_params': True, 'pass_epoch': False},
+            'lr_scheduler': {'step_on_iter': False, 'scale_params': False, 'pass_epoch': False},
             'norm_loss_for_step': True,
             'plateau_scheduler': None,
-            'loss': {'type': 'bce'},
+            'loss': {'type': 'bce', 'loss_weights': (.142857, .142857, .142857, .142857, .142857, 0.285715)},
             'stopper': None,
         },
 
         'metric': {
             'best_metric': 'loss',
             'score_bigger_is_better': False,
-            'loss_weights': [1, 1, 1, 1, 1, 2]
+            'loss_weights': (.142857, .142857, .142857, .142857, .142857, 0.285715)
 
         },
         'other': {
@@ -339,7 +339,6 @@ class ClassifierTrainer(object):
 
         logger.info("LOSS")
         logger.info(str(self.criterion))
-
         logger.info("norm_loss_for_step: %s", str(self.norm_loss_for_step))
 
         logger.info("OTHER")
@@ -444,7 +443,6 @@ class ClassifierTrainer(object):
         self.model.eval()
         with torch.no_grad():
             for i, sample in enumerate(tbar):
-                metrics = {}
 
                 image = sample['image'].cuda()
                 target = sample['target'].cuda()
@@ -524,6 +522,7 @@ class ClassifierTrainer(object):
                  'train_metrics': train_logs,
                  'test_transforms': A.to_dict(self.test_transforms),
                  'model_params': self.model_params,
+                 'class_order': self.classes,
                  }
         self.saver.save_checkpoint(filename=self.model_filename_format.format(epoch), is_best=is_best, **state)
 
@@ -539,14 +538,13 @@ class ClassifierTrainer(object):
         for epoch in range(self.start_epoch, self.epochs):
             for i in range(self.steps_per_epoch):
 
-                epoch_dec = epoch + i / (self.steps_per_epoch)
                 iters.append(iter_)
                 epoch_decs.append(epoch_dec)
                 lrs.append([p['lr'] for p in self.optimizer.param_groups])
 
                 if (i + 1) % self.step_size == 0:
                     last_step = i
-                    # epoch_dec = epoch + i / self.steps_per_epoch / self.step_size
+                    epoch_dec = epoch + i / self.steps_per_epoch / self.step_size
                     step_epoch = epoch_dec if self.scheduler_pass_epoch else None
                     if self.lr_scheduler is not None and self.lr_step_on_iter:
                         self.lr_scheduler.step(step_epoch)

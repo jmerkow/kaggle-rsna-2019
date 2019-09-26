@@ -26,26 +26,24 @@ readers = {
 
 
 class RSNA2019Dataset(VisionDataset):
-    label_map = {
-        'any': 'label__any',
-        'edh': 'label__epidural',
-        'iph': 'label__intraparenchymal',
-        'ivh': 'label__intraventricular',
-        'sah': 'label__subarachnoid',
-        'sdh': 'label__subdural',
 
+    label_map = {
+        'any': 'any',
+        'edh': 'epidural',
+        'iph': 'intraparenchymal',
+        'ivh': 'intraventricular',
+        'sah': 'subarachnoid',
+        'sdh': 'subdural',
     }
 
     def __init__(self, root, csv_file, transform=None, target_transform=None, transforms=None,
                  convert_rgb=True, preprocessing=None, img_ids=None,
                  reader='h5',
-                 class_order=None, **filter_params):
+                 class_order=('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
+                 **filter_params):
         super(RSNA2019Dataset, self).__init__(root, transforms, transform, target_transform)
 
         self.data = pd.read_csv(csv_file).set_index('ImageId')
-
-        if class_order is None:
-            class_order = self.label_map.keys()
 
         assert all(c in self.label_map for c in class_order), "bad class order"
         self.class_order = class_order
@@ -76,12 +74,12 @@ class RSNA2019Dataset(VisionDataset):
             tuple: Tuple (image, target). target is a list of captions for the image.
         """
         img_id = self.ids[index]
-        image_row = self.data.loc[img_id]
+        image_row = self.data.loc[img_id].to_dict()
         path = image_row['filepath']
         path = os.path.splitext(path)[0] + '.' + self.image_ext
 
         img = self.read_image(os.path.join(self.root, path))
-        target = [(image_row[self.label_map[c]]).astype('float32') for c in self.class_order]
+        target = [(image_row.get(self.label_map[c], np.float32(0))) for c in self.class_order]
 
         output = dict(image=img)
         if self.transforms is not None:
