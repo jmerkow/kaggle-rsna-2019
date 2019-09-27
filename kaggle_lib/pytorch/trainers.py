@@ -65,13 +65,14 @@ class ClassifierTrainer(object):
             'random_split_group': 'sop_instance_uid',
             'batch_size': 32,
             'max_images_per_card': None,
-            'num_workers': 8,
+            'num_workers': 12,
             'data_shape': (224, 224),
             'epochs': 50,
             'data_root': '/data/',
             'augmentation': {'resize': 'auto'},
             'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
-            'filter': {}
+            'filter': {},
+            'reader': 'h5',
 
         },
         'optimization': {
@@ -280,7 +281,7 @@ class ClassifierTrainer(object):
         optimizer_type = optimizer.pop('type')
         optimizer_params = optimizer.pop('optimizer_params', {})
 
-        lr_scheduler_params_ = optimization_params.pop('lr_scheduler')
+        lr_scheduler_params_ = optimization_params.pop('lr_scheduler', {}) or {}
         plateau_scheduler_params = optimization_params.pop('plateau_scheduler', None)
 
         stop_on_plateau_params = optimization_params.pop('stopper', None)
@@ -306,8 +307,9 @@ class ClassifierTrainer(object):
                                               for k, v in self.plateau_scheduler.state_dict().items())
 
         self.lr_scheduler = None
-        self.scheduler_pass_epoch = lr_scheduler_params_.pop('pass_epoch', False)
+        self.scheduler_pass_epoch = None
         if lr_scheduler_params_ is not None:
+            self.scheduler_pass_epoch = lr_scheduler_params_.pop('pass_epoch', False)
             lr_scheduler_params = {}
             if 'schedulers' not in lr_scheduler_params_:
                 lr_scheduler_params['schedulers'] = lr_scheduler_params_
@@ -400,7 +402,7 @@ class ClassifierTrainer(object):
             loss.backward()
             if (i + 1) % self.step_size == 0:
                 last_step = i
-                epoch_dec = epoch + i / self.steps_per_epoch / self.step_size
+                epoch_dec = epoch + i / self.steps_per_epoch
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 if self.lr_scheduler is not None and self.lr_step_on_iter:
@@ -538,13 +540,13 @@ class ClassifierTrainer(object):
         for epoch in range(self.start_epoch, self.epochs):
             for i in range(self.steps_per_epoch):
 
+                epoch_dec = epoch + i / self.steps_per_epoch
                 iters.append(iter_)
                 epoch_decs.append(epoch_dec)
                 lrs.append([p['lr'] for p in self.optimizer.param_groups])
 
                 if (i + 1) % self.step_size == 0:
                     last_step = i
-                    epoch_dec = epoch + i / self.steps_per_epoch / self.step_size
                     step_epoch = epoch_dec if self.scheduler_pass_epoch else None
                     if self.lr_scheduler is not None and self.lr_step_on_iter:
                         self.lr_scheduler.step(step_epoch)
