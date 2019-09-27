@@ -15,7 +15,6 @@ from ..dicom import sitk_read_image
 def h5_read_image(fn):
     with h5py.File(fn, 'r') as f:
         array = np.array(f['data']).astype('float32')
-
     return array
 
 
@@ -79,7 +78,10 @@ class RSNA2019Dataset(VisionDataset):
         path = os.path.splitext(path)[0] + '.' + self.image_ext
 
         img = self.read_image(os.path.join(self.root, path))
-        target = [(image_row.get(self.label_map[c], np.float32(0))) for c in self.class_order]
+        try:
+            target = [(image_row['label__' + self.label_map[c]]) for c in self.class_order]
+        except KeyError:
+            target = None
 
         output = dict(image=img)
         if self.transforms is not None:
@@ -89,12 +91,14 @@ class RSNA2019Dataset(VisionDataset):
                 raise NotImplementedError('Not implemented yet, must be albumentation based transform')
 
         if self.preprocessing:
-            target = torch.tensor(target).float()
+            if target is not None:
+                target = torch.tensor(target).float()
             output = self.preprocessing(**output)
 
         output['index'] = index
         output['image_id'] = img_id
-        output['target'] = target
+        if target is not None:
+            output['target'] = target
 
         return output
 
