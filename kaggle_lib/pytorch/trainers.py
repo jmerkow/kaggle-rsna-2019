@@ -50,8 +50,7 @@ class ClassifierTrainer(object):
             'activation': 'sigmoid',
             'model_dir': '/data/pretrained_weights/',
             'weights': None,
-            'classifier_params': {'type': 'basic'},
-            'tasks': ('cls',)
+            'classifier': 'basic',
         },
         'data': {
             'dataset': 'rsna2019-stage1',
@@ -172,7 +171,7 @@ class ClassifierTrainer(object):
         self.is_multi_task = self.model.is_multi_task
 
         logger.info("model: %s", self.model.name)
-        logger.info("model tasks: %s", self.model.tasks)
+        logger.info("model output info: %s", self.model.output_info())
 
     def _setup_data(self, **data_params):
 
