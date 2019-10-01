@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from .augmentation import make_augmentation, make_transforms, get_preprocessing
 from .datacatalog import get_dataset, dataset_map, datacatalog, get_csv_file
+from .dataloaders import CustomDataLoader
 from .get_model import get_model
 from .loss import Criterion
 from .lr_scheduler import get_scheduler
@@ -251,9 +252,9 @@ class ClassifierTrainer(object):
 
         logger.info("Num Images, train: %d, val: %d", len(train_dataset), len(val_dataset))
 
-        with open(os.path.join(self.workdir, 'training_images.yml'), 'w') as f:
-            print(yaml.safe_dump({'train': list(train_dataset.ids.values()),
-                                  'val': list(val_dataset.ids.values())}), file=f)
+        # with open(os.path.join(self.workdir, 'training_images.yml'), 'w') as f:
+        # print(yaml.safe_dump({'train': list(train_dataset.ids.values()),
+        # 'val': list(val_dataset.ids.values())}), file=f)
 
         logger.info('====DATA====')
         logger.info('TRAINING')
@@ -262,10 +263,11 @@ class ClassifierTrainer(object):
         logger.info('VALIDATION')
         logger.info(str(val_dataset))
 
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                                       num_workers=num_workers)
+        self.train_loader = CustomDataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                                       num_workers=num_workers, img_ids=train_img_ids, **filter_params)
         if val_dataset is not None:
-            self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False)
+            self.val_loader = CustomDataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4,
+                                               img_ids=val_img_ids, drop_last=False, **filter_params)
         else:
             self.val_loader = None
 

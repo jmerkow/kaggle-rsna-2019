@@ -36,21 +36,19 @@ class RSNA2019Dataset(VisionDataset):
     }
 
     def __init__(self, root, csv_file, transform=None, target_transform=None, transforms=None,
-                 convert_rgb=True, preprocessing=None, img_ids=None,
-                 reader='h5',
-                 class_order=('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
-                 **filter_params):
+                 convert_rgb=True, preprocessing=None, reader='h5', img_ids=None,
+                 class_order=('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'), **filter_params):
         super(RSNA2019Dataset, self).__init__(root, transforms, transform, target_transform)
-
-        self.data = pd.read_csv(csv_file).set_index('ImageId')
+        self.csv_file = csv_file
+        # just to find dataset size
+        data = pd.read_csv(csv_file).set_index('ImageId')
+        img_ids = img_ids or data.index.tolist()
+        img_ids = self.apply_filter(img_ids, **filter_params)
+        self._len = len(img_ids)
 
         assert all(c in self.label_map for c in class_order), "bad class order"
         self.class_order = class_order
 
-        img_ids = img_ids or self.data.index.tolist()
-        img_ids = self.apply_filter(img_ids, **filter_params)
-        self.ids = {i: imgid for i, imgid in enumerate(img_ids)}
-        self.rev_ids = {v: k for k, v in self.ids.items()}
         self.transforms_are_albumentation = isinstance(self.transforms, BaseCompose)
         self.convert_rgb = convert_rgb
         self.preprocessing = preprocessing
@@ -64,16 +62,7 @@ class RSNA2019Dataset(VisionDataset):
         # place holder for now
         return img_ids
 
-    def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
-
-        Returns:
-            tuple: Tuple (image, target). target is a list of captions for the image.
-        """
-        img_id = self.ids[index]
-        image_row = self.data.loc[img_id].to_dict()
+    def __getitem__(self, image_row):
         path = image_row['filepath']
         path = os.path.splitext(path)[0] + '.' + self.image_ext
 
@@ -95,12 +84,15 @@ class RSNA2019Dataset(VisionDataset):
                 target = torch.tensor(target).float()
             output = self.preprocessing(**output)
 
-        output['index'] = index
-        output['image_id'] = img_id
+        output['image_id'] = image_row['ImageId']
+        output['index'] = list(image_row.index)[0]
         if target is not None:
             output['target'] = target
 
         return output
 
+    def get_csv_file(self):
+        return self.csv_file
+
     def __len__(self):
-        return len(self.ids)
+        return self._len
