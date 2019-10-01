@@ -15,7 +15,7 @@ def get_ds_data(rows, dataset):
 
 class CustomDataLoader(object):
 
-    def __init__(self, dataset, batch_size = 1, shuffle = False, num_workers = None, backend='loky',
+    def __init__(self, dataset, batch_size = 1, shuffle = False, num_workers = None, backend='multiprocessing',
                  img_ids=None,
                  *args,
                  **filter_params):
