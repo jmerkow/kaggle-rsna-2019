@@ -72,6 +72,7 @@ class ClassifierTrainer(object):
             'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
             'filter': {},
             'reader': 'h5',
+            'pin_memory': True,
 
         },
         'optimization': {
@@ -199,6 +200,11 @@ class ClassifierTrainer(object):
         random_split_state = data_params['random_split_state']
         random_split_stratified = data_params['random_split_stratified']
 
+        reader = data_params['reader']
+        val_reader = data_params.get('reader', reader)
+
+        pin_memory = data_params['pin_memory']
+
         self.batch_size = data_params['batch_size']
         self.max_images_per_card = data_params.get('max_images_per_card', None)
         self.device_ids = get_gpu_ids()
@@ -250,11 +256,11 @@ class ClassifierTrainer(object):
 
         train_dataset = get_dataset(train_catalog, self.data_root, transforms=self.train_transforms,
                                     preprocessing=get_preprocessing(self.model_preprocessing),
-                                    img_ids=train_img_ids, class_order=self.classes,
+                                    img_ids=train_img_ids, class_order=self.classes, reader=reader,
                                     **filter_params)
         val_dataset = get_dataset(val_catalog, self.data_root, transforms=self.val_transforms,
                                   preprocessing=get_preprocessing(self.model_preprocessing),
-                                  img_ids=val_img_ids, class_order=self.classes,
+                                  img_ids=val_img_ids, class_order=self.classes, reader=val_reader,
                                   **val_filter_params)
 
         logger.info("Num Images, train: %d, val: %d", len(train_dataset), len(val_dataset))
@@ -271,9 +277,10 @@ class ClassifierTrainer(object):
         logger.info(str(val_dataset))
 
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                                       num_workers=num_workers)
+                                       num_workers=num_workers, pin_memory=pin_memory)
         if val_dataset is not None:
-            self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False)
+            self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False,
+                                         pin_memory=pin_memory)
         else:
             self.val_loader = None
 

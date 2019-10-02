@@ -24,7 +24,7 @@ def h5_read_image(fn):
 
 class NumpyMemmapReader(object):
     __info_filename = 'memmap_info.json'
-    __memmap_dat_filename = ' "memmap.dat"'
+    __memmap_dat_filename = "memmap.dat"
 
     def __init__(self, img_dir, dtype='float32', data=None):
         self.dtype = dtype
@@ -71,11 +71,12 @@ class RSNA2019Dataset(VisionDataset):
 
         assert reader in ['h5', 'dcm', 'memmap'], 'bad reader type'
 
+        super(RSNA2019Dataset, self).__init__(root, transforms, transform, target_transform)
+
         self.reader_type = reader
-        if self.reader_type is 'memmap':
+        if self.reader_type == 'memmap':
             self.reader = NumpyMemmapReader(self.root, dtype='float32')
 
-        super(RSNA2019Dataset, self).__init__(root, transforms, transform, target_transform)
         data = pd.read_csv(csv_file).set_index('ImageId')
 
         data['fullpath'] = self.root + "/" + data['filepath']
