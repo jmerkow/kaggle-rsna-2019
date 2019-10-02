@@ -54,8 +54,20 @@ class Timer(object):
         self.average_time = 0.
 
     @staticmethod
-    def to_string(seconds):
+    def _to_string(seconds):
         return hms_string(seconds)
+
+    @property
+    def total_time_str(self):
+        return self._to_string(self.total_time)
+
+    @property
+    def average_time_str(self):
+        return self._to_string(self.average_time)
+
+    @property
+    def diff_str(self):
+        return self._to_string(self.diff)
 
     @property
     def elapsed_time(self):
