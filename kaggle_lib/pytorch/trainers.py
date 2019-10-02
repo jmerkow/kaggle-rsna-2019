@@ -24,7 +24,7 @@ from .metrics import RSNA2019Metric
 from .saver import Saver
 from .summary import TensorboardSummary
 from .sync_batchnorm import convert_model, patch_replication_callback
-from .utils import get_gpu_ids, StopOnPlateau, rsna2019_split
+from .utils import get_gpu_ids, StopOnPlateau, rsna2019_split, Timer
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ class ClassifierTrainer(object):
 
         },
         'other': {
-            'train_log_every': 100,
+            'train_log_every': 10,
             'sync_bn': False,
             'visual_count': 8,
             'visualize_every': 50,
@@ -103,6 +103,7 @@ class ClassifierTrainer(object):
     model_glob_str = 'model_step(?P<step>\d*).pth.tar'
     model_subdir = 'checkpoints'
 
+
     def _is_metric_better(self, curr_score, prev_score):
         if self.score_bigger_is_better:
             return curr_score > prev_score
@@ -110,6 +111,9 @@ class ClassifierTrainer(object):
             return curr_score < prev_score
 
     def __init__(self, workdir='.', **kwargs):
+        self.timers = defaultdict(Timer)
+        self.train_timers = defaultdict(Timer)
+
         self.workdir = os.path.abspath(workdir)
 
         if not os.path.exists(self.workdir):
@@ -133,13 +137,17 @@ class ClassifierTrainer(object):
 
         self.setup()
 
+
     def setup(self):
+        self.timers['setup'].tic()
         self._setup_random(**deepcopy(self.random_params))
         self._setup_model(**deepcopy(self.model_params))
         self._setup_data(**deepcopy(self.data_params))
         self._setup_optimization(**deepcopy(self.optimization_params))
         self._setup_metrics(**deepcopy(self.metric_params))
         self._setup_other(**deepcopy(self.other_params))
+        self.timers['setup'].toc()
+        logger.info('Setup took %s', self.timers['setup'].total_time_str)
 
     def _setup_random(self, seed=None, backend_deterministic=False, backend_benchmark=False):
         if seed is not None:
@@ -373,22 +381,39 @@ class ClassifierTrainer(object):
         epoch_meters = defaultdict(lambda: AverageValueMeter())
         intra_epoch_meters = defaultdict(lambda: AverageValueMeter())
         self.model.train()
-        tbar = tqdm(self.train_loader, desc='Epoch {} Train'.format(epoch), file=sys.stdout)
-        num_img_tr = len(self.train_loader)
+
 
         self.optimizer.zero_grad()
         last_step = 0
-        for i, sample in enumerate(tbar):
+        num_img_tr = len(self.train_loader)
+        tdl = iter(self.train_loader)
+        tbar = tqdm(list(range(num_img_tr)), desc='Epoch {} Train'.format(epoch), file=sys.stdout)
+        local_timers = self.train_timers
+        for i in tbar:
+            local_timers['iter'].tic()
+            local_timers['data'].tic()
+            sample = next(tdl)
+            local_timers['data'].toc()
+
             step = i + num_img_tr * epoch
             metrics = {}
             for lri, lr in enumerate([p['lr'] for p in self.optimizer.param_groups]):
                 metrics['lr-{}'.format(lri)] = lr
 
+            local_timers['to_cuda'].tic()
             image = sample['image'].cuda()
             target = sample['target'].cuda()
+            local_timers['to_cuda'].toc()
+
+            local_timers['score'].tic()
             scores = self.model(image)
+            local_timers['score'].toc()
+
+            local_timers['loss'].tic()
             loss = self.criterion(scores, target)
             raw_loss = self.criterion.raw_loss
+            local_timers['loss'].toc()
+
             metrics['loss'] = loss.cpu().detach().numpy()
             metrics.update({'loss-' + name: l.cpu().numpy() for name, l in zip(self.classes, raw_loss)})
 
@@ -398,8 +423,12 @@ class ClassifierTrainer(object):
             if self.norm_loss_for_step:
                 loss *= 1. / self.step_size
 
+            local_timers['backward'].tic()
             loss.backward()
+            local_timers['backward'].toc()
+
             if (i + 1) % self.step_size == 0:
+                local_timers['step'].tic()
                 last_step = i
                 epoch_dec = epoch + i / self.steps_per_epoch
                 self.optimizer.step()
@@ -407,17 +436,23 @@ class ClassifierTrainer(object):
                 if self.lr_scheduler is not None and self.lr_step_on_iter:
                     step_epoch = epoch_dec if self.scheduler_pass_epoch else None
                     self.lr_scheduler.step(step_epoch)
+                local_timers['step'].toc()
+
+            local_timers['iter'].toc()
+            metrics.update({'time-' + name: t.diff for name, t in local_timers.items()})
 
             for name, value in metrics.items():
                 epoch_meters[name].add(value)
                 intra_epoch_meters[name].add(value)
                 logs[name] = epoch_meters[name].mean
                 if (i + 1) % self.train_log_every == 0:
-                    self.summary.add_scalar('train/{}'.format(name), intra_epoch_meters[name].mean, step)
+                    write_name = 'train/{}'.format(name) \
+                        if not name.startswith('time-') else 'timer/train/{}'.format(name.replace('time-', ''))
+
+                    self.summary.add_scalar(write_name, intra_epoch_meters[name].mean, step)
                     intra_epoch_meters[name].reset()
 
             s = self._format_logs(logs)
-
             tbar.set_postfix_str(s)
 
         if last_step != i:
@@ -428,10 +463,21 @@ class ClassifierTrainer(object):
                 self.lr_scheduler.step(step_epoch)
 
         for name, value in logs.items():
-            self.summary.add_scalar('train-epoch/mean-{}'.format(name), value, epoch + 1)
+            write_name = 'train-epoch/mean-{}'.format(name) \
+                if not name.startswith('time-') else 'timer-epoch/train/mean-{}'.format(name.replace('time-', ''))
+            self.summary.add_scalar(write_name, value, epoch + 1)
+        t_logs = {}
+        for name, t in local_timers.items():
+            t_logs['timer-total-{}'.format(name)] = t.total_time_str
+            self.summary.add_scalar('timer-epoch/total-{}'.format(name), t.total_time, epoch + 1)
+            t.reset()
+            # self.summary.add_scalar('train-epoch/timer-average-{}'.format(name), t.average_time, epoch + 1)
+
+        t_s = ', '.join('{}={}'.format(k, v) for k, v in t_logs.items())
         s = self._format_logs(logs)
-        logger.info('[Epoch: %d, numImages: %5d] Train scores: %s', epoch + 1, i * self.step_size + image.data.shape[0],
-                    s)
+        logger.info('[Epoch: %d, numImages: %5d] Train scores: %s, times: %s', epoch + 1,
+                    i * self.step_size + image.data.shape[0],
+                    s, t_s)
         if self.lr_scheduler is not None and not self.lr_step_on_iter:
             step_epoch = epoch if self.scheduler_pass_epoch else None
             self.lr_scheduler.step(step_epoch)
