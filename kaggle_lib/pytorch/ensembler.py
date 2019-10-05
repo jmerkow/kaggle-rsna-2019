@@ -6,6 +6,7 @@ import os
 from collections import defaultdict
 
 import albumentations as A
+import numpy as np
 import pandas as pd
 import six
 import torch
@@ -20,12 +21,30 @@ from kaggle_lib.pytorch.tta import TTATransform
 from kaggle_lib.pytorch.utils import HidePrints, Timer, hms_string
 
 
+def make_submission_df(raw_csv_file, clip=0):
+    raw_df = pd.read_csv(raw_csv_file).set_index('ID')
+    submission_df = raw_df.unstack()
+
+    submission_df.index.names = ['label_name', 'ID']
+    submission_df.name = 'Label'
+
+    submission_df = submission_df.swaplevel(0, 1).sort_index().to_frame().reset_index()
+    submission_df['ID'] = submission_df['ID'] + '_' + submission_df['label_name']
+
+    submission_df = submission_df.drop_duplicates(subset=['ID'])
+    submission_df = submission_df.set_index(['ID'])[['Label']]
+
+    if clip:
+        submission_df['Label'] = submission_df['Label'].apply(lambda x: np.clip(x, clip, 1 - clip))
+
+    return submission_df
+
 def is_model_dict(d):
     return 'model_fn' in d
 
 
 def make_model_name(model_name, tta_function=None):
-    bad_names = ['mnt', 'nas', 'experiments', 'SIIM-2019', 'checkpoints']
+    bad_names = ['mnt', 'nas', 'experiments-kaggle', 'rsna2019', 'checkpoints', 'results']
     model_name = '_'.join([s for s in model_name.strip(os.sep, ).split(os.sep) if s not in bad_names]).replace(
         '.pth.tar', '')
     return '{}-tta{}'.format(model_name, str(tta_function).title())
