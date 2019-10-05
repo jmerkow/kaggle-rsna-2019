@@ -64,9 +64,9 @@ class ClassifierTrainer(object):
             'random_split_group': 'sop_instance_uid',
             'batch_size': 32,
             'max_images_per_card': None,
-            'num_workers': 12,
+            'num_workers': 2,
             'data_shape': (224, 224),
-            'epochs': 50,
+            'epochs': 15,
             'data_root': '/data/',
             'augmentation': {'resize': 'auto'},
             'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
@@ -225,6 +225,7 @@ class ClassifierTrainer(object):
         self.train_transforms = make_augmentation(self.data_shape, **augmentation)
         self.val_transforms = make_transforms(self.data_shape, **augmentation)
         self.test_transforms = make_transforms(self.data_shape, **augmentation)
+        self.transform_args = dict(data_shape=self.data_shape, augmentation=augmentation)
 
         train_dataset_name, val_dataset_name = dataset_map[self.dataset]['train'], dataset_map[dataset]['val']
 
@@ -575,6 +576,7 @@ class ClassifierTrainer(object):
                  'scorecard': scorecard,
                  'train_metrics': train_logs,
                  'test_transforms': A.to_dict(self.test_transforms),
+                 'transform': self.transform_args,
                  'model_params': self.model_params,
                  'class_order': self.classes,
                  }
