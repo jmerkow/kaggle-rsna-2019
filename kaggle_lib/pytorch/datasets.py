@@ -65,9 +65,11 @@ class RSNA2019Dataset(VisionDataset):
                  reader='h5',
                  class_order=('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
                  limit=None,
+                 tta_transform=None,
                  **filter_params):
 
         self.timers = defaultdict(Timer)
+        self.tta_transform = tta_transform
 
         assert reader in ['h5', 'dcm', 'memmap'], 'bad reader type'
 
@@ -147,12 +149,20 @@ class RSNA2019Dataset(VisionDataset):
                 raise NotImplementedError('Not implemented yet, must be albumentation based transform')
         self.timers['augmentation'].toc()
 
-        self.timers['preprocessing'].tic()
-        if self.preprocessing:
+        if self.tta_transform is not None:
+            images = self.tta_transform(output['image'])
+            images = [self.preprocessing(image=image)['image'] for image in images]
+            tmp = torch.stack(images)
+            output['image'] = tmp
             if target is not None:
                 target = torch.tensor(target).float()
-            output = self.preprocessing(**output)
-        self.timers['preprocessing'].toc()
+        else:
+            self.timers['preprocessing'].tic()
+            if self.preprocessing:
+                if target is not None:
+                    target = torch.tensor(target).float()
+                output = self.preprocessing(**output)
+            self.timers['preprocessing'].toc()
 
         output['index'] = index
         output['image_id'] = img_id

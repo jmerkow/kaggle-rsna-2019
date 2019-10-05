@@ -26,6 +26,29 @@ from albumentations.pytorch import ToTensor
 from kaggle_lib.dicom import windows_as_channels
 
 
+def get_preprocessing(preprocessing_fn=None, data_shape=None):
+    """Construct preprocessing transform
+
+    Args:
+        preprocessing_fn (callbale): data normalization function
+            (can be specific for each pretrained neural network)
+    Return:
+        transform: albumentations.Compose
+
+    """
+    transform = []
+
+    if data_shape is not None:
+        transform.append(PadIfNeeded(min_height=data_shape[1], min_width=data_shape[0]))
+        transform.append(CenterCrop(height=data_shape[1], width=data_shape[0]))
+
+    if preprocessing_fn is not None:
+        transform.append(Lambda(image=preprocessing_fn), )
+    transform.append(ToTensor())
+
+    return Compose(transform)
+
+
 class ChannelWindowing(ImageOnlyTransform):
     """
     """
@@ -184,13 +207,15 @@ def make_transforms(data_shape, resize=None,
                     windows=('soft_tissue',),
                     windows_force_rgb=True,
                     max_value=1.0,
+                    apply_crop=True,
                     **kwargs):
     transforms = []
     if resize == 'auto':
         resize = data_shape
     if resize:
         transforms.append(Resize(*resize))
-    transforms.append(CenterCrop(height=data_shape[1], width=data_shape[0]))
+    if apply_crop:
+        transforms.append(CenterCrop(height=data_shape[1], width=data_shape[0]))
 
     transforms.append(ChannelWindowing(
         windows=windows,
@@ -202,19 +227,3 @@ def make_transforms(data_shape, resize=None,
     return Compose(transforms)
 
 
-def get_preprocessing(preprocessing_fn=None):
-    """Construct preprocessing transform
-
-    Args:
-        preprocessing_fn (callbale): data normalization function
-            (can be specific for each pretrained neural network)
-    Return:
-        transform: albumentations.Compose
-
-    """
-    transform = []
-    if preprocessing_fn is not None:
-        transform.append(Lambda(image=preprocessing_fn), )
-    transform.append(ToTensor())
-
-    return Compose(transform)

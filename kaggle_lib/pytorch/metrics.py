@@ -19,6 +19,7 @@ class RSNA2019Metric(object):
 
         loss = self.criteria(scores, target).cpu().detach().numpy()
         raw_loss = self.criteria.raw_loss.cpu().detach().numpy()
+        scores = scores.cpu().detach().numpy()
 
         if batch_size == 1:
             loss = [loss]
