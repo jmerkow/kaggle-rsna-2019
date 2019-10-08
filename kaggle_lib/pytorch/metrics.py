@@ -6,36 +6,32 @@ from .loss import Criterion
 class RSNA2019Metric(object):
     image_id_key = 'image_id'
 
-    def __init__(self, class_order, **kwargs):
+    def __init__(self, classes, **kwargs):
         kwargs['reduction'] = 'none'
-        self.class_order = class_order
-        self.criteria = Criterion(**kwargs).cuda()
+        self.classes = classes
+        self.criteria = Criterion(classes=classes, **kwargs)
 
     def add_batch(self, scores, target, sample):
 
         image_ids = sample.get(self.image_id_key)
-        target = target
-        batch_size = len(scores)
-
-        loss = self.criteria(scores, target).cpu().detach().numpy()
-        raw_loss = self.criteria.raw_loss.cpu().detach().numpy()
-        scores = scores.cpu().detach().numpy()
-
-        if batch_size == 1:
-            loss = [loss]
-            raw_loss = [raw_loss]
-            image_ids = [image_ids]
+        metrics = self.criteria(scores, target)
+        if isinstance(scores, dict):
+            scores = {k: v.cpu().detach().numpy() for k, v in scores.items()}
+        else:
+            scores = scores.cpu().detach().numpy()
 
         for i, ImageId in enumerate(image_ids):
             row = {
                 'ImageId': ImageId,
-                'loss': loss[i]
             }
-            row.update({'loss_' + c: r for c, r in zip(self.class_order, raw_loss[i])})
-            row.update({'score_' + c: r for c, r in zip(self.class_order, scores[i])})
-            self.rows.append(row)
 
-        del self.criteria.raw_loss
+            row.update({name: m[i] for name, m in metrics.items()})
+            if isinstance(scores, dict):
+                row.update({'{}/score_{}'.format(name, c): r
+                            for name, scoress in scores.items() for c, r in zip(self.classes, scoress[i])})
+            else:
+                row.update({'score_' + c: r for c, r in zip(self.classes, scores[i])})
+            self.rows.append(row)
 
     def reset(self):
         self.rows = []

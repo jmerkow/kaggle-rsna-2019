@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import torch
 from torch import nn
 
@@ -30,7 +32,49 @@ class FocalWithLogitsLoss(FocalLoss):
     loss_func = nn.BCEWithLogitsLoss
 
 
-class Criterion(nn.Module):
+class Criterion(object):
+
+    def __init__(self, classes=None, tasks=None, **defaults):
+
+        self.classes = classes
+        # self.defaults = defaults
+        self.default_criterion = _Criterion(**defaults).cuda()
+        self.criteria = defaultdict(lambda: _Criterion(**defaults).cuda())
+
+        tasks = tasks or {}
+        for task in tasks:
+            params = defaults.copy()
+            params.update(tasks.get(task, {}))
+            self.criteria[task] = _Criterion(**params).cuda()
+
+    def __call__(self, scores, targets):
+
+        self.losses = []
+        metrics = {}
+
+        if isinstance(scores, dict):
+            for task, sc in scores.items():
+                criterion = self.criteria[task]
+                loss = criterion(sc, targets)
+                metrics['{}/loss'.format(task)] = loss.cpu().detach().numpy()
+                metrics.update({'{}/loss-{}'.format(task, cl_name): l.cpu().detach().numpy()
+                                for cl_name, l in zip(self.classes, criterion.raw_loss.T)})
+                self.losses.append(loss)
+        else:
+            criterion = self.default_criterion
+            loss = criterion(scores, targets)
+            metrics['loss'] = loss.cpu().detach().numpy()
+            metrics.update({'loss-{}'.format(cl_name): l.cpu().detach().numpy()
+                            for cl_name, l in zip(self.classes, criterion.raw_loss)})
+
+        return metrics
+
+    def backward(self):
+        for loss in self.losses:
+            loss.backward(retain_graph=True)
+
+
+class _Criterion(nn.Module):
     loss_types = [
         {
             'bce': torch.nn.BCELoss,
