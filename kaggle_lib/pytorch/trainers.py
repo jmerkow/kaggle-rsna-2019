@@ -306,7 +306,7 @@ class ClassifierTrainer(object):
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                                        num_workers=num_workers, pin_memory=pin_memory)
         if val_dataset is not None:
-            self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False,
+            self.val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4, drop_last=False,
                                          pin_memory=pin_memory)
         else:
             self.val_loader = None

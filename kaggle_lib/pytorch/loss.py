@@ -64,12 +64,14 @@ class Criterion(object):
                 metrics.update({'{}-{}'.format(base_name, cl_name): l.cpu().detach().numpy()
                                 for cl_name, l in zip(self.classes, criterion.raw_loss.T)})
                 self.losses.append(loss)
+                del criterion.raw_loss
         else:
             criterion = self.default_criterion
             loss = criterion(scores, targets)
             metrics['loss'] = loss.cpu().detach().numpy()
             metrics.update({'loss-{}'.format(cl_name): l.cpu().detach().numpy()
-                            for cl_name, l in zip(self.classes, criterion.raw_loss)})
+                            for cl_name, l in zip(self.classes, criterion.raw_loss.T)})
+            del criterion.raw_loss
 
         return metrics
 
