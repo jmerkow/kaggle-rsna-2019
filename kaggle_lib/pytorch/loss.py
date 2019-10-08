@@ -34,8 +34,8 @@ class FocalWithLogitsLoss(FocalLoss):
 
 class Criterion(object):
 
-    def __init__(self, classes=None, tasks=None, **defaults):
-
+    def __init__(self, classes=None, tasks=None, final_output=None, **defaults):
+        self.final_output = final_output
         self.classes = classes
         # self.defaults = defaults
         self.default_criterion = _Criterion(**defaults).cuda()
@@ -56,8 +56,12 @@ class Criterion(object):
             for task, sc in scores.items():
                 criterion = self.criteria[task]
                 loss = criterion(sc, targets)
-                metrics['{}/loss'.format(task)] = loss.cpu().detach().numpy()
-                metrics.update({'{}/loss-{}'.format(task, cl_name): l.cpu().detach().numpy()
+                if task == self.final_output:
+                    base_name = 'loss'
+                else:
+                    base_name = '{}/loss'.format(task)
+                metrics[base_name] = loss.cpu().detach().numpy()
+                metrics.update({'{}-{}'.format(base_name, cl_name): l.cpu().detach().numpy()
                                 for cl_name, l in zip(self.classes, criterion.raw_loss.T)})
                 self.losses.append(loss)
         else:

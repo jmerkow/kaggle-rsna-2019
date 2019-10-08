@@ -1,3 +1,4 @@
+import glob
 import logging
 import os
 import shutil
@@ -25,3 +26,6 @@ class Saver(object):
             best_filename = os.path.join(self.directory, 'best_model.pth.tar')
             shutil.copy(filename, best_filename, follow_symlinks=False)
             logger.info("Best Model! Copying to '%s'", best_filename.replace(self.workdir, '').strip('/'))
+
+    def get_checkpoints(self, filename_glob):
+        return glob.glob(os.path.join(self.directory, filename_glob))

@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import re
 import sys
 from collections import defaultdict
 from copy import deepcopy
@@ -109,17 +110,20 @@ class ClassifierTrainer(object):
     }
 
     model_filename_format = "model_step{:03d}.pth.tar"
-    model_glob_str = 'model_step(?P<step>\d*).pth.tar'
+    model_glob_str = 'model_step*.pth.tar'
+    model_epoch_regex = 'model_step(?P<step>\d*).pth.tar'
     model_subdir = 'checkpoints'
 
-
-    def _is_metric_better(self, curr_score, prev_score):
+    def _is_metric_better(self, curr_score):
+        if self.prev_score is None:
+            return True
         if self.score_bigger_is_better:
-            return curr_score > prev_score
+            return curr_score > self.prev_score
         else:
-            return curr_score < prev_score
+            return curr_score < self.prev_score
 
     def __init__(self, workdir='.', **kwargs):
+        self.prev_score = None
         self.timers = defaultdict(Timer)
         self.train_timers = defaultdict(Timer)
 
@@ -131,10 +135,6 @@ class ClassifierTrainer(object):
             logger.info("Workdir: %s", self.workdir)
         self.summary = TensorboardSummary(self.workdir)
         self.saver = Saver(self.workdir, subdir=self.model_subdir)
-
-        ## TODO: Figure out!
-        self.start_epoch = 0
-
         self.config = {}
         for k, section in self.section_defaults.items():
             self.config[k] = {}
@@ -143,9 +143,25 @@ class ClassifierTrainer(object):
             setattr(self, k + '_params', self.config[k])
 
         logger.info(yaml.safe_dump(self.config))
-
         self.setup()
 
+        self.start_epoch = 0
+        self.try_resume()
+
+    def try_resume(self):
+        fs = self.saver.get_checkpoints(self.model_glob_str)
+        if len(fs):
+            files_dict = {}
+            for f in fs:
+                match = re.search(self.model_epoch_regex, f)
+                if match:
+                    files_dict[int(match.groupdict()['step'])] = f
+
+            max_step = max(files_dict.keys())
+            latest_checkpoint_path = files_dict[max_step]
+
+            logger.info('resuming at step: %d, path: %s', max_step, latest_checkpoint_path)
+            self.load_checkpoint(latest_checkpoint_path)
 
     def setup(self):
         self.timers['setup'].tic()
@@ -312,7 +328,7 @@ class ClassifierTrainer(object):
         stop_on_plateau_params = optimization_params.pop('stopper', None)
         loss_params = optimization_params.pop('loss')
 
-        self.criterion = Criterion(classes=self.classes, **loss_params)
+        self.criterion = Criterion(classes=self.classes, final_output=self.final_output, **loss_params)
 
         self.norm_loss_for_step = optimization_params.pop('norm_loss_for_step', True)
 
@@ -384,7 +400,7 @@ class ClassifierTrainer(object):
         logger.info('====METRICS====')
         self.score_bigger_is_better = metric_params.pop('score_bigger_is_better', False)
         self.best_metric = metric_params.pop('best_metric')
-        self.val_metrics = RSNA2019Metric(classes=self.classes, **metric_params)
+        self.val_metrics = RSNA2019Metric(classes=self.classes, final_output=self.final_output, **metric_params)
 
     def _setup_other(self, **other_params):
         logger.info('====OTHER====')
@@ -401,23 +417,6 @@ class ClassifierTrainer(object):
         str_logs = ['{}={:.4}'.format(k, v) for k, v in logs.items()]
         s = ', '.join(str_logs)
         return s
-
-    def _loss_step(self, loss, raw_loss, suffix=''):
-        metrics = {}
-
-        name = 'loss'
-        if suffix:
-            name = name + '-' + 'suffix'
-        metrics[name] = loss.cpu().detach().numpy()
-        metrics.update()
-        if self.norm_loss_for_step:
-            loss *= 1. / self.step_size
-
-        loss.backward()
-
-        return metrics
-
-
 
     def step_epoch(self, epoch):
 
@@ -564,19 +563,18 @@ class ClassifierTrainer(object):
             self.model = torch.nn.DataParallel(self.model, device_ids=self.device_ids)
         self.model = self.model.cuda()
 
-        prev_score = None
         for epoch in range(self.start_epoch, self.epochs):
             train_logs = self.step_epoch(epoch)
             val_logs = self.validation(epoch)
             curr_score = val_logs[self.best_metric]
 
-            if prev_score is None:
+            if self.prev_score is None:
                 logger.info("Prev Best Score: None, Current Score: %.5f", curr_score)
                 is_best = True
             else:
-                logger.info("Prev Best Score: %.5f, Current Score: %.5f", prev_score, curr_score)
-                is_best = self._is_metric_better(curr_score, prev_score)
-            prev_score = curr_score
+                logger.info("Prev Best Score: %.5f, Current Score: %.5f", self.prev_score, curr_score)
+                is_best = self._is_metric_better(curr_score)
+            self.prev_score = curr_score
             self.save_checkpoint(epoch + 1, curr_score, is_best, val_logs, train_logs)
 
             val_loss = val_logs['loss']
@@ -589,24 +587,81 @@ class ClassifierTrainer(object):
 
         return train_logs, val_logs
 
-    def save_checkpoint(self, epoch, curr_score, is_best, val_logs, train_logs):
+    # """
+    # class Saver(object):
+    #
+    #     def __init__(self, workdir='.', subdir='checkpoints'):
+    #         self.workdir = os.path.abspath(workdir)
+    #         self.directory = os.path.join(self.workdir, subdir)
+    #         logger.info("saver at '%s'", self.directory)
+    #         if not os.path.exists(self.directory):
+    #             os.makedirs(self.directory)
+    #
+    #     def save_checkpoint(self, filename='checkpoint.pth.tar', is_best=False, **state):
+    #         """Saves checkpoint to disk"""
+    #         filename = os.path.join(self.directory, filename)
+    #         torch.save(state, filename)
+    #         logger.info("saving to %s", filename.replace(self.workdir, '').strip('/'))
+    #         if is_best:
+    #             best_filename = os.path.join(self.directory, 'best_model.pth.tar')
+    #             shutil.copy(filename, best_filename, follow_symlinks=False)
+    #             logger.info("Best Model! Copying to '%s'", best_filename.replace(self.workdir, '').strip('/'))
+    #             """
 
-        if is_best:
-            logger.info('Best model!')
-        scorecard = val_logs.pop('scorecard', [])
-        state = {'epoch': epoch, 'state_dict': self.model.module.state_dict(),
+    def state_dict(self, epoch):
+        state = {'epoch': epoch,
+                 'state_dict': self.model.module.state_dict(),
                  'optimizer': self.optimizer.state_dict(),
                  'score_metric': self.best_metric,
-                 'score': curr_score,
-                 'val_metrics': val_logs,
-                 'scorecard': scorecard,
-                 'train_metrics': train_logs,
                  'test_transforms': A.to_dict(self.test_transforms),
                  'transform': self.transform_args,
                  'model_params': self.model_params,
                  'class_order': self.classes,
+                 'final_output': self.final_output,
                  }
-        self.saver.save_checkpoint(filename=self.model_filename_format.format(epoch), is_best=is_best, **state)
+
+        if self.lr_scheduler is not None:
+            state['lr_scheduler'] = self.lr_scheduler.state_dict()
+
+        if self.plateau_scheduler is not None:
+            state['plateau_scheduler'] = self.plateau_scheduler.state_dict()
+
+        if self.stopper is not None:
+            state['stopper'] = self.stopper.state_dict()
+
+        return state
+
+
+    def save_checkpoint(self, epoch, curr_score, is_best, val_logs, train_logs):
+        if is_best:
+            logger.info('Best model!')
+        scorecard = val_logs.pop('scorecard', [])
+        state = self.state_dict(epoch=epoch)
+        self.saver.save_checkpoint(filename=self.model_filename_format.format(epoch),
+                                   is_best=is_best,
+                                   score=curr_score,
+                                   val_metrics=val_logs,
+                                   scorecard=scorecard,
+                                   train_metrics=train_logs,
+                                   **state)
+
+    def load_checkpoint(self, checkpoint_path):
+
+        state = torch.load(checkpoint_path)
+
+        self.start_epoch = state['epoch']
+        self.prev_score = state['score']
+        self.model.load_state_dict(state['state_dict'])
+        self.optimizer.load_state_dict(state['optimizer'])
+
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.load_state_dict(state['lr_scheduler'])
+
+        if self.plateau_scheduler is not None:
+            self.plateau_scheduler.load_state_dict(state['plateau_scheduler'])
+
+        if self.stopper is not None:
+            self.stopper.load_state_dict(state['stopper'])
 
     def lr_sim(self):
         print('WARNING!! you need to re-create this trainer, running this messed with your LR rates')
