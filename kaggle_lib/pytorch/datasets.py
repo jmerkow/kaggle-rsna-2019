@@ -60,12 +60,21 @@ class RSNA2019Dataset(VisionDataset):
         'sdh': 'subdural',
     }
 
+    default_extra_fields = [
+        'median_ipp_z_diff_norm',
+        'mean_ipp_z_diff_norm',
+        'median_ipp_z_diff',
+        'mean_ipp_z_diff',
+        'ipp_z'
+    ]
+
     def __init__(self, root, csv_file, transform=None, target_transform=None, transforms=None,
                  convert_rgb=True, preprocessing=None, img_ids=None,
                  reader='h5',
                  class_order=('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
                  limit=None,
                  tta_transform=None,
+                 extra_fields=None,
                  **filter_params):
 
         self.timers = defaultdict(Timer)
@@ -82,6 +91,11 @@ class RSNA2019Dataset(VisionDataset):
         data = pd.read_csv(csv_file).set_index('ImageId')
 
         data['fullpath'] = self.root + "/" + data['filepath']
+        extra_fields = extra_fields or []
+        self.extra_fields = set(extra_fields + self.default_extra_fields)
+        missing_fields = self.extra_fields.difference(data)
+        if len(missing_fields):
+            raise ValueError('no fields: {}'.format(', '.join(missing_fields)))
 
         assert all(c in self.label_map for c in class_order), "bad class order"
         self.class_order = class_order
@@ -118,6 +132,22 @@ class RSNA2019Dataset(VisionDataset):
         elif self.reader_type == 'memmap':
             assert self.reader is not None
             return self.reader[image_id]
+
+    def __repr__(self):
+        body = []
+        body += ["Reader: {}".format(self.reader_type)]
+        body += ['Extra Fields: {}'.format(','.join(self.extra_fields))]
+        lines = [" " * self._repr_indent + line for line in body]
+        lines.insert(0, super().__repr__())
+        return '\n'.join(lines)
+
+    def _get_extra_fields(self, image_row):
+        output = {x: np.atleast_1d((pd.to_numeric(image_row[x], errors='coerce'))) for x in self.extra_fields}
+
+        if self.preprocessing:
+            output = {k: torch.tensor(v) for k, v in output.items()}
+
+        return output
 
     def __getitem__(self, index):
         """
@@ -169,6 +199,7 @@ class RSNA2019Dataset(VisionDataset):
         if target is not None:
             output['target'] = target
 
+        output.update(self._get_extra_fields(image_row))
         self.timers['getitem'].toc()
         return output
 
