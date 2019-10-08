@@ -39,6 +39,7 @@ def make_submission_df(raw_csv_file, clip=0):
 
     return submission_df
 
+
 def is_model_dict(d):
     return 'model_fn' in d
 
@@ -155,13 +156,13 @@ class Ensembler(object):
 
     def _repr_ensemble_(self):
         head = "Ensemble " + self.name
+
         body = ["TTA: {} ".format(self.tta_type)]
+        body += ['Models']
+        body += [" " * self.__repr_indent__ + l for l in json.dumps(self.models, indent=2).split('\n')]
 
-        body.append("Models")
-        body.extend([" " * self.__repr_indent__ + l for l in json.dumps(self.models, indent=2).split('\n')])
-
-        body.append("Models Dict")
-        body.extend([" " * self.__repr_indent__ + l for l in json.dumps(self.models_dict, indent=2).split('\n')])
+        body += ["Models Dice", ]
+        body += [" " * self.__repr_indent__ + l for l in json.dumps(self.models_dict, indent=2).split('\n')]
 
         lines = [head] + [" " * self.__repr_indent__ + line for line in body]
 
@@ -218,7 +219,7 @@ class Ensembler(object):
     def dataname(self):
         return '_'.join([self.dataset, self.mode])
 
-    def write_model_results(self, model_fn, batch_size=8, desc='', force_overwrite=False):
+    def write_model_results(self, model_fn, batch_size=8, desc='', force_overwrite=False, output='final'):
         checkpoint = torch.load(os.path.join(self.model_root, model_fn),
                                 map_location='cuda:{}'.format(torch.cuda.current_device()))
         model, preprocessing, transforms = self.load_model(checkpoint)
@@ -290,9 +291,13 @@ class Ensembler(object):
                 if image.ndim > 4:
                     bs, ncrops, c, h, w = image.size()
                     scores = model.predict(image.view(-1, c, h, w))
+                    if isinstance(scores, dict):
+                        scores = scores[output]
                     scores = scores.view(bs, ncrops, -1).mean(1)
                 else:
                     scores = model.predict(image)
+                    if isinstance(scores, dict):
+                        scores = scores[output]
                 scores = scores.cpu().detach().numpy()
                 for n, ImageId in enumerate(kaggle_ids):
                     row = {
@@ -419,8 +424,3 @@ class Ensembler(object):
         #         self.load_results()
 
         return self.results_file
-
-
-
-
-

@@ -21,6 +21,7 @@ from .get_model import get_model
 from .loss import Criterion
 from .lr_scheduler import get_scheduler
 from .metrics import RSNA2019Metric
+from .optimizers import RAdam, Ralamb, Lookahead
 from .saver import Saver
 from .summary import TensorboardSummary
 from .sync_batchnorm import convert_model, patch_replication_callback
@@ -35,11 +36,15 @@ class ClassifierTrainer(object):
                        'adagrad': torch.optim.Adagrad,
                        'adam': torch.optim.Adam,
                        'adamx': torch.optim.Adamax,
+                       'adamw': torch.optim.AdamW,
                        'lbfgs': torch.optim.LBFGS,
                        'rmsprop': torch.optim.RMSprop,
                        'rprop': torch.optim.Rprop,
                        'sgd': torch.optim.SGD,
-                       'sparceadam': torch.optim.SparseAdam}
+                       'sparceadam': torch.optim.SparseAdam,
+                       'radam': RAdam,
+                       'ralamb': Ralamb,
+                       }
 
     section_defaults = {
         'random': {'seed': None, 'backend_deterministic': False, 'backend_benchmark': False},
@@ -51,6 +56,7 @@ class ClassifierTrainer(object):
             'model_dir': '/data/pretrained_weights/',
             'weights': None,
             'classifier': 'basic',
+            'final_output': 'final',
         },
         'data': {
             'dataset': 'rsna2019-stage1',
@@ -83,6 +89,8 @@ class ClassifierTrainer(object):
             'norm_loss_for_step': True,
             'plateau_scheduler': None,
             'loss': {'type': 'bce', 'loss_weights': (.142857, .142857, .142857, .142857, .142857, 0.285715)},
+            'use_lookahead': False,
+            'lookahead_params': None,
             'stopper': None,
         },
 
@@ -166,7 +174,9 @@ class ClassifierTrainer(object):
         with open(os.path.join(self.workdir, 'model_params.yml'), 'w') as f:
             print(yaml.safe_dump(model_params), file=f)
 
+        self.final_output = model_params.pop('final_output')
         self.model, self.model_preprocessing = get_model(**model_params)
+
 
         if weights:
             model_dir = model_params['model_dir']
@@ -302,7 +312,7 @@ class ClassifierTrainer(object):
         stop_on_plateau_params = optimization_params.pop('stopper', None)
         loss_params = optimization_params.pop('loss')
 
-        self.criterion = Criterion(**loss_params).cuda()
+        self.criterion = Criterion(classes=self.classes, **loss_params)
 
         self.norm_loss_for_step = optimization_params.pop('norm_loss_for_step', True)
 
@@ -312,7 +322,16 @@ class ClassifierTrainer(object):
             {'params': self.model.get_classifier_params(), 'lr': base_lr * classifier_lr_mult}
 
         ]
-        self.optimizer = self.optimizer_types[optimizer_type](params, **optimizer_params)
+
+        optimizer = self.optimizer_types[optimizer_type](params, **optimizer_params)
+        use_lookahead = optimization_params.pop('use_lookahead')
+
+        if use_lookahead:
+            logger.info("Using lookahead optimization!")
+            lookahead_params = optimization_params.pop('lookahead_params') or {}
+            self.optimizer = Lookahead(optimizer, **lookahead_params)
+        else:
+            self.optimizer = optimizer
 
         self.plateau_scheduler = None
         plateau_scheduler_str = "None"
@@ -365,7 +384,7 @@ class ClassifierTrainer(object):
         logger.info('====METRICS====')
         self.score_bigger_is_better = metric_params.pop('score_bigger_is_better', False)
         self.best_metric = metric_params.pop('best_metric')
-        self.val_metrics = RSNA2019Metric(class_order=self.classes, **metric_params)
+        self.val_metrics = RSNA2019Metric(classes=self.classes, **metric_params)
 
     def _setup_other(self, **other_params):
         logger.info('====OTHER====')
@@ -383,6 +402,23 @@ class ClassifierTrainer(object):
         s = ', '.join(str_logs)
         return s
 
+    def _loss_step(self, loss, raw_loss, suffix=''):
+        metrics = {}
+
+        name = 'loss'
+        if suffix:
+            name = name + '-' + 'suffix'
+        metrics[name] = loss.cpu().detach().numpy()
+        metrics.update()
+        if self.norm_loss_for_step:
+            loss *= 1. / self.step_size
+
+        loss.backward()
+
+        return metrics
+
+
+
     def step_epoch(self, epoch):
 
         logs = {}
@@ -390,13 +426,13 @@ class ClassifierTrainer(object):
         intra_epoch_meters = defaultdict(lambda: AverageValueMeter())
         self.model.train()
 
-
         self.optimizer.zero_grad()
         last_step = 0
         num_img_tr = len(self.train_loader)
         tdl = iter(self.train_loader)
         tbar = tqdm(list(range(num_img_tr)), desc='Epoch {} Train'.format(epoch), file=sys.stdout)
         local_timers = self.train_timers
+
         for i in tbar:
             local_timers['iter'].tic()
             local_timers['data'].tic()
@@ -418,21 +454,11 @@ class ClassifierTrainer(object):
             local_timers['score'].toc()
 
             local_timers['loss'].tic()
-            loss = self.criterion(scores, target)
-            raw_loss = self.criterion.raw_loss
+            metrics.update(self.criterion(scores, target))
             local_timers['loss'].toc()
 
-            metrics['loss'] = loss.cpu().detach().numpy()
-            metrics.update({'loss-' + name: l.cpu().numpy() for name, l in zip(self.classes, raw_loss)})
-
-            # metrics.update({metric_fn.__name__: metric_fn(score, gt).cpu().detach().numpy()
-            #                 for metric_fn in self.score_metrics})
-
-            if self.norm_loss_for_step:
-                loss *= 1. / self.step_size
-
             local_timers['backward'].tic()
-            loss.backward()
+            self.criterion.backward()
             local_timers['backward'].toc()
 
             if (i + 1) % self.step_size == 0:
