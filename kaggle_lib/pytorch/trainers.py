@@ -25,6 +25,7 @@ from .saver import Saver
 from .summary import TensorboardSummary
 from .sync_batchnorm import convert_model, patch_replication_callback
 from .utils import get_gpu_ids, StopOnPlateau, rsna2019_split, Timer
+from .sampler import LabelSampler
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,7 @@ class ClassifierTrainer(object):
         random_split_group = data_params['random_split_group']
         random_split_state = data_params['random_split_state']
         random_split_stratified = data_params['random_split_stratified']
+        sampler_params = data_params['sampler']
 
         reader = data_params['reader']
         val_reader = data_params.get('reader', reader)
@@ -277,7 +279,12 @@ class ClassifierTrainer(object):
         logger.info('VALIDATION')
         logger.info(str(val_dataset))
 
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+        if sampler_params:
+            self.sampler = LabelSampler(ids=train_dataset.ids, data=train_dataset.data, **sampler_params)
+        else:
+            self.sampler = None
+
+        self.train_loader = DataLoader(train_dataset, sampler=self.sampler, batch_size=batch_size, shuffle=True,
                                        num_workers=num_workers, pin_memory=pin_memory)
         if val_dataset is not None:
             self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False,
@@ -489,6 +496,9 @@ class ClassifierTrainer(object):
         if self.lr_scheduler is not None and not self.lr_step_on_iter:
             step_epoch = epoch if self.scheduler_pass_epoch else None
             self.lr_scheduler.step(step_epoch)
+        if self.sampler:
+            self.sampler.step(epoch)
+
         return logs
 
     def validation(self, epoch):
