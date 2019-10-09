@@ -60,13 +60,15 @@ class RSNA2019Dataset(VisionDataset):
         'sdh': 'subdural',
     }
 
-    default_extra_fields = [
-        'median_ipp_z_diff_norm',
-        'mean_ipp_z_diff_norm',
-        'median_ipp_z_diff',
-        'mean_ipp_z_diff',
-        'ipp_z'
-    ]
+    default_extra_fields = []
+
+    # [
+    #     'median_ipp_z_diff_norm',
+    #     'mean_ipp_z_diff_norm',
+    #     'median_ipp_z_diff',
+    #     'mean_ipp_z_diff',
+    #     'ipp_z'
+    # ]
 
     def __init__(self, root, csv_file, transform=None, target_transform=None, transforms=None,
                  convert_rgb=True, preprocessing=None, img_ids=None,
@@ -145,7 +147,7 @@ class RSNA2019Dataset(VisionDataset):
         output = {x: np.atleast_1d((pd.to_numeric(image_row[x], errors='coerce'))) for x in self.extra_fields}
 
         if self.preprocessing:
-            output = {k: torch.tensor(v) for k, v in output.items()}
+            output = {k: torch.tensor(v).float() for k, v in output.items()}
 
         return output
 

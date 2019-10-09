@@ -193,6 +193,8 @@ class ClassifierTrainer(object):
         self.final_output = model_params.pop('final_output')
         self.model, self.model_preprocessing = get_model(**model_params)
 
+        self.required_inputs = self.model.required_inputs
+
 
         if weights:
             model_dir = model_params['model_dir']
@@ -284,10 +286,12 @@ class ClassifierTrainer(object):
         train_dataset = get_dataset(train_catalog, self.data_root, transforms=self.train_transforms,
                                     preprocessing=get_preprocessing(self.model_preprocessing),
                                     img_ids=train_img_ids, class_order=self.classes, reader=reader,
+                                    extra_fields=self.required_inputs,
                                     **filter_params)
         val_dataset = get_dataset(val_catalog, self.data_root, transforms=self.val_transforms,
                                   preprocessing=get_preprocessing(self.model_preprocessing),
                                   img_ids=val_img_ids, class_order=self.classes, reader=val_reader,
+                                  extra_fields=self.required_inputs,
                                   **val_filter_params)
 
         logger.info("Num Images, train: %d, val: %d", len(train_dataset), len(val_dataset))
@@ -444,12 +448,13 @@ class ClassifierTrainer(object):
                 metrics['lr-{}'.format(lri)] = lr
 
             local_timers['to_cuda'].tic()
-            image = sample['image'].cuda()
-            target = sample['target'].cuda()
+            image = sample.pop('image').cuda()
+            target = sample.pop('target').cuda()
+            extra_inputs = {k: sample[k].cuda() for k in self.required_inputs}
             local_timers['to_cuda'].toc()
 
             local_timers['score'].tic()
-            scores = self.model(image)
+            scores = self.model(image, **extra_inputs)
             local_timers['score'].toc()
 
             local_timers['loss'].tic()
@@ -523,10 +528,10 @@ class ClassifierTrainer(object):
         self.model.eval()
         with torch.no_grad():
             for i, sample in enumerate(tbar):
-
-                image = sample['image'].cuda()
-                target = sample['target'].cuda()
-                scores = self.model(image)
+                image = sample.pop('image').cuda()
+                target = sample.pop('target').cuda()
+                extra_inputs = {k: sample[k].cuda() for k in self.required_inputs}
+                scores = self.model(image, **extra_inputs)
                 # loss = self.criterion(scores, target)
                 # raw_loss = self.criterion.raw_loss
                 # metrics['loss'] = loss.cpu().detach().numpy()
