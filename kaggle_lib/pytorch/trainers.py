@@ -282,11 +282,13 @@ class ClassifierTrainer(object):
         if sampler_params:
             print("using sampler: {}".format(str(sampler_params)))
             self.sampler = LabelSampler(ids=train_dataset.ids, data=train_dataset.data, **sampler_params)
+            train_shuffle = False
         else:
             self.sampler = None
+            train_shuffle = True
 
-        self.train_loader = DataLoader(train_dataset, sampler=self.sampler, batch_size=batch_size, shuffle=True,
-                                       num_workers=num_workers, pin_memory=pin_memory)
+        self.train_loader = DataLoader(train_dataset, sampler=self.sampler, batch_size=batch_size,
+                                       shuffle=train_shuffle, num_workers=num_workers, pin_memory=pin_memory)
         if val_dataset is not None:
             self.val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False,
                                          pin_memory=pin_memory)
