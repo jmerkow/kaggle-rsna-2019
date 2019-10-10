@@ -10,7 +10,7 @@ class LabelSampler(Sampler):
         self.neg_idxs = idxs[np.nonzero(labels == 0)]
 
         self.start_rate = start_rate
-        self.end_rate = start_rate
+        self.end_rate = end_rate
         self.cycle_length = cycle_length
         self.n_positive = sum(labels)
 
