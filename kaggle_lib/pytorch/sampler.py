@@ -4,7 +4,7 @@ import numpy as np
 
 class LabelSampler(Sampler):
     def __init__(self, ids, data, label, cur_epoch=0, start_pos_freq = 1.0, end_pos_freq=1.0, cycle_length=5.0):
-        idxs = np.array(ids.keys())
+        idxs = np.array(list(ids.keys()))
         labels = np.array([data[img_id]['label__' + label] for img_id in ids.values()])
         print(labels)
         print(idxs)
