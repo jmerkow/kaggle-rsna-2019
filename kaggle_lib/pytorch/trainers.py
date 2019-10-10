@@ -280,6 +280,7 @@ class ClassifierTrainer(object):
         logger.info(str(val_dataset))
 
         if sampler_params:
+            print("using sampler: {}".format(str(sampler_params)))
             self.sampler = LabelSampler(ids=train_dataset.ids, data=train_dataset.data, **sampler_params)
         else:
             self.sampler = None
