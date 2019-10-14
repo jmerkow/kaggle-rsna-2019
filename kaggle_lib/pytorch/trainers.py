@@ -16,8 +16,9 @@ from torch.utils.data import DataLoader
 from torchnet.meter import AverageValueMeter
 from tqdm import tqdm
 
+# from .datacatalog import dataset_map, datacatalog
+from kaggle_lib.pytorch.datasets import get_csv_file, get_dataset, get_data_constants
 from .augmentation import make_augmentation, make_transforms, get_preprocessing
-from .datacatalog import get_dataset, dataset_map, datacatalog, get_csv_file
 from .get_model import get_model
 from .loss import Criterion
 from .lr_scheduler import get_scheduler
@@ -80,6 +81,7 @@ class ClassifierTrainer(object):
             'filter': {},
             'reader': 'h5',
             'pin_memory': True,
+            'extra_datasets': None,
 
         },
         'optimization': {
@@ -228,6 +230,8 @@ class ClassifierTrainer(object):
         random_split_state = data_params['random_split_state']
         random_split_stratified = data_params['random_split_stratified']
 
+        extra_datasets = data_params.pop('extra_datasets', None)
+
         reader = data_params['reader']
         val_reader = data_params.get('reader', reader)
 
@@ -255,6 +259,7 @@ class ClassifierTrainer(object):
         self.test_transforms = make_transforms(self.data_shape, **augmentation)
         self.transform_args = dict(data_shape=self.data_shape, augmentation=augmentation)
 
+        datacatalog, dataset_map = get_data_constants(self.data_root)
         train_dataset_name, val_dataset_name = dataset_map[self.dataset]['train'], dataset_map[dataset]['val']
 
         train_catalog = datacatalog[train_dataset_name]
@@ -287,6 +292,7 @@ class ClassifierTrainer(object):
                                     preprocessing=get_preprocessing(self.model_preprocessing),
                                     img_ids=train_img_ids, class_order=self.classes, reader=reader,
                                     extra_fields=self.required_inputs,
+                                    extra_datasets=extra_datasets,
                                     **filter_params)
         val_dataset = get_dataset(val_catalog, self.data_root, transforms=self.val_transforms,
                                   preprocessing=get_preprocessing(self.model_preprocessing),

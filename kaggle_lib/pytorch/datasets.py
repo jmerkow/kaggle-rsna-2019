@@ -8,12 +8,21 @@ from collections import defaultdict
 import h5py
 import numpy as np
 import pandas as pd
+import six
 import torch
+import yaml
 from albumentations.core.composition import BaseCompose
 from torchvision.datasets.vision import VisionDataset
 
 from kaggle_lib.dicom import sitk_read_image
 from kaggle_lib.pytorch.utils import Timer
+
+
+def get_data_constants(data_root='/data', filename='datacatalog.yml'):
+    with open(os.path.join(data_root, filename), 'r') as f:
+        config = yaml.safe_load(f)
+
+    return config['datacatalog'], config['dataset_map']
 
 
 def h5_read_image(fn):
@@ -77,6 +86,7 @@ class RSNA2019Dataset(VisionDataset):
                  limit=None,
                  tta_transform=None,
                  extra_fields=None,
+                 extra_datasets=None,
                  **filter_params):
 
         self.timers = defaultdict(Timer)
@@ -85,6 +95,8 @@ class RSNA2019Dataset(VisionDataset):
         assert reader in ['h5', 'dcm', 'memmap'], 'bad reader type'
 
         super(RSNA2019Dataset, self).__init__(root, transforms, transform, target_transform)
+
+        print("ROOT:", self.root)
 
         self.reader_type = reader
         if self.reader_type == 'memmap':
@@ -101,11 +113,35 @@ class RSNA2019Dataset(VisionDataset):
 
         assert all(c in self.label_map for c in class_order), "bad class order"
         self.class_order = class_order
+
+        extra_data = []
+        if extra_datasets is not None:
+            if isinstance(extra_datasets, six.string_types):
+                extra_datasets = [extra_datasets]
+
+            for extra_dataset in extra_datasets:
+                datacatalog, dataset_map = get_data_constants('/data')
+                dataset_dict = datacatalog[extra_dataset]
+                extra_dataset_imgdir = os.path.join('/data/', dataset_dict['img_dir'])
+                extra_dataset_csv = os.path.join('/data/', dataset_dict['csv_file'])
+                df = pd.read_csv(extra_dataset_csv).set_index('ImageId')
+                print(list(df))
+                df['fullpath'] = extra_dataset_imgdir + "/" + df['filepath']
+                extra_data.append(df)
+
         img_ids = img_ids or data.index.tolist()
         if limit:
             random.shuffle(img_ids)
             img_ids = img_ids[:limit]
         img_ids = self.apply_filter(img_ids, **filter_params)
+        data = data.loc[img_ids]
+
+        self.original_data_len = len(data)
+
+        if extra_data:
+            data = pd.concat([data] + extra_data, sort=True)
+
+        img_ids = data.index.tolist()
         self.ids = {i: imgid for i, imgid in enumerate(img_ids)}
 
         self._num_images = len(self.ids)
@@ -137,6 +173,8 @@ class RSNA2019Dataset(VisionDataset):
 
     def __repr__(self):
         body = []
+        body += ["Original Data Count: {}, Extra Data Count: {}".format(self.original_data_len,
+                                                                        self._num_images - self.original_data_len)]
         body += ["Reader: {}".format(self.reader_type)]
         body += ['Extra Fields: {}'.format(','.join(self.extra_fields))]
         lines = [" " * self._repr_indent + line for line in body]
@@ -192,6 +230,7 @@ class RSNA2019Dataset(VisionDataset):
             self.timers['preprocessing'].tic()
             if self.preprocessing:
                 if target is not None:
+                    print(target)
                     target = torch.tensor(target).float()
                 output = self.preprocessing(**output)
             self.timers['preprocessing'].toc()
@@ -207,3 +246,15 @@ class RSNA2019Dataset(VisionDataset):
 
     def __len__(self):
         return self._num_images
+
+
+def get_csv_file(dataset_dict, data_root):
+    if dataset_dict:
+        return os.path.join(data_root, dataset_dict['csv_file'])
+
+
+def get_dataset(dataset_dict, data_root, **kwargs):
+    if dataset_dict:
+        root = os.path.join(data_root, dataset_dict['img_dir'])
+        csv_file = os.path.join(data_root, dataset_dict['csv_file'])
+        return RSNA2019Dataset(root=root, csv_file=csv_file, **kwargs)

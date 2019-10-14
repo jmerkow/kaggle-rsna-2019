@@ -15,7 +15,8 @@ import yaml
 from torch.utils.data import DataLoader
 
 from kaggle_lib.pytorch.augmentation import get_preprocessing, make_transforms
-from kaggle_lib.pytorch.datacatalog import get_dataset, dataset_map, datacatalog
+# from kaggle_lib.pytorch.datacatalog import dataset_map, datacatalog
+from kaggle_lib.pytorch.datasets import get_dataset, get_data_constants
 from kaggle_lib.pytorch.get_model import get_model
 from kaggle_lib.pytorch.tta import TTATransform
 from kaggle_lib.pytorch.utils import HidePrints, Timer, hms_string
@@ -129,6 +130,8 @@ class Ensembler(object):
         self.dataset = dataset
         self.data_root = data_root
 
+        self._datacatalog, self._dataset_map = get_data_constants(self.data_root)
+
         self.kaggle_ids = list(self.get_dataset().ids.values())
         self.allow_skip = allow_skip
 
@@ -142,6 +145,7 @@ class Ensembler(object):
         self.tta_type = None
 
         self.reset_counts()
+
 
     def _repr_preamble_(self):
         head = "Dataset " + self.dataname
@@ -199,16 +203,17 @@ class Ensembler(object):
 
     @property
     def datacatalog(self):
-        return datacatalog[dataset_map[self.dataset][self.mode]]
+        return self._datacatalog[self._dataset_map[self.dataset][self.mode]]
 
     @staticmethod
     def load_model(checkpoint):
         model_params = checkpoint['model_params']
         model_params.pop('weights', None)
+        final_output = model_params.pop('final_output', None)
         model, preprocessing = get_model(**model_params)
         model.load_state_dict(checkpoint['state_dict'])
         transforms = A.from_dict(checkpoint['test_transforms'])
-        return model, preprocessing, transforms
+        return model, preprocessing, transforms, final_output
 
     @staticmethod
     def get_written_ids(save_full_filename):
@@ -222,8 +227,9 @@ class Ensembler(object):
     def write_model_results(self, model_fn, batch_size=8, desc='', force_overwrite=False, output='final'):
         checkpoint = torch.load(os.path.join(self.model_root, model_fn),
                                 map_location='cuda:{}'.format(torch.cuda.current_device()))
-        model, preprocessing, transforms = self.load_model(checkpoint)
+        model, preprocessing, transforms, final_output = self.load_model(checkpoint)
 
+        # TODO: deal with final output
         epoch = checkpoint['epoch']
         class_order = checkpoint['class_order']
 
@@ -239,7 +245,7 @@ class Ensembler(object):
         augmentation = transform_params['augmentation']
         data_shape = transform_params['data_shape']
 
-        transforms = make_transforms(data_shape, **augmentation, apply_crop=True)
+        transforms = make_transforms(data_shape, apply_crop=True, **augmentation)
         tta_transform = TTATransform(data_shape=data_shape, **self.tta_params)
         assert tta_transform.name == self.tta_type, 'ttas do not match'
         save_filename = "results/{dataname}/model_step{epoch:0>3}_TTA-{tta_type}.csv".format(dataname=self.dataname,
@@ -269,11 +275,13 @@ class Ensembler(object):
         print("[Infer {}]".format(desc), "num kaggle ids:", len(self.kaggle_ids), "Need Write:", len(need_write))
         print("[Infer {}]".format(desc), 'Model:', model_fn)
 
+        extra_fields = model.required_inputs
         model = model.cuda()
         model.eval()
         loader = self.get_dataloader(transforms=transforms,
                                      preprocessing=get_preprocessing(preprocessing, data_shape=data_shape),
-                                     batch_size=batch_size, image_ids=need_write, tta_transform=tta_transform)
+                                     batch_size=batch_size, image_ids=need_write, tta_transform=tta_transform,
+                                     extra_fields=extra_fields)
 
         pbar = tqdm.tqdm(enumerate(loader), total=len(loader), desc="Infer [{}]".format(desc))
         skipped = 0
@@ -286,16 +294,28 @@ class Ensembler(object):
             for i, sample in pbar:
                 pbar.set_postfix_str("Skipped: {}".format(skipped))
 
-                kaggle_ids = sample['image_id']
-                image = sample['image'].cuda()
+                kaggle_ids = sample.pop('image_id')
+                image = sample.pop('image').cuda()
+
+                # print(sample.keys())
+                extra_inputs = {k: sample[k].cuda() for k in extra_fields}
+                # print(image.shape)
+                #
+                # print({k: v.shape for k, v in extra_inputs.items()})
                 if image.ndim > 4:
                     bs, ncrops, c, h, w = image.size()
-                    scores = model.predict(image.view(-1, c, h, w))
+
+                    def expand_scalars(t):
+                        return t.unsqueeze(1).repeat(1, ncrops, 1).view(-1, 1)
+
+                    extra_inputs = {k: expand_scalars(v) for k, v in extra_inputs.items()}
+
+                    scores = model.predict(image.view(-1, c, h, w), **extra_inputs)
                     if isinstance(scores, dict):
                         scores = scores[output]
                     scores = scores.view(bs, ncrops, -1).mean(1)
                 else:
-                    scores = model.predict(image)
+                    scores = model.predict(image, **extra_inputs)
                     if isinstance(scores, dict):
                         scores = scores[output]
                 scores = scores.cpu().detach().numpy()
