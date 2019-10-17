@@ -17,7 +17,7 @@ from torchnet.meter import AverageValueMeter
 from tqdm import tqdm
 
 # from .datacatalog import dataset_map, datacatalog
-from kaggle_lib.pytorch.datasets import get_csv_file, get_dataset, get_data_constants
+from kaggle_lib.pytorch.datasets import get_csv_file, get_dataset, get_data_constants, SequenceBatchSampler
 from .augmentation import make_augmentation, make_transforms, get_preprocessing
 from .get_model import get_model
 from .loss import Criterion
@@ -82,6 +82,7 @@ class ClassifierTrainer(object):
             'reader': 'h5',
             'pin_memory': True,
             'extra_datasets': None,
+            'sequence_mode': False,
 
         },
         'optimization': {
@@ -223,6 +224,8 @@ class ClassifierTrainer(object):
         filter_params = data_params['filter']
         num_workers = data_params['num_workers']
 
+        self.sequence_mode = data_params['sequence_mode']
+
         random_split = data_params['random_split']
         n_splits = data_params['n_splits']
         fold = data_params['fold']
@@ -313,13 +316,21 @@ class ClassifierTrainer(object):
         logger.info('VALIDATION')
         logger.info(str(val_dataset))
 
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                                       num_workers=num_workers, pin_memory=pin_memory)
-        if val_dataset is not None:
-            self.val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4, drop_last=False,
-                                         pin_memory=pin_memory)
+        self.val_loader = None
+        if not self.sequence_mode:
+            self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                                           num_workers=num_workers, pin_memory=pin_memory)
+            if val_dataset is not None:
+                self.val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4, drop_last=False,
+                                             pin_memory=pin_memory)
         else:
-            self.val_loader = None
+            self.train_loader = DataLoader(train_dataset,
+                                           batch_sampler=SequenceBatchSampler(train_dataset, shuffle=True),
+                                           num_workers=num_workers, pin_memory=pin_memory)
+            if val_dataset is not None:
+                self.val_loader = DataLoader(val_dataset,
+                                             batch_sampler=SequenceBatchSampler(val_dataset, shuffle=False),
+                                             num_workers=4, pin_memory=pin_memory)
 
         self.iters_in_epoch = len(self.train_loader)
 

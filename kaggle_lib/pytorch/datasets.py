@@ -12,10 +12,56 @@ import six
 import torch
 import yaml
 from albumentations.core.composition import BaseCompose
+from torch.utils.data.sampler import Sampler
 from torchvision.datasets.vision import VisionDataset
 
 from kaggle_lib.dicom import sitk_read_image
 from kaggle_lib.pytorch.utils import Timer
+
+
+class SequenceSampler(Sampler):
+
+    def __init__(self, dataset, shuffle=False, replacement=False):
+        self.shuffle = shuffle
+        self.replacement = replacement
+        self.sequences = list(dataset.sequences.values())
+        self.num_samples = len(self.sequences)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        n = self.num_samples
+        if self.shuffle:
+            if self.replacement:
+                indices = torch.randint(high=n, size=(n,), dtype=torch.int64).tolist()
+            else:
+                indices = torch.randperm(n).tolist()
+        else:
+            indices = range(n)
+        return (self.sequences[i] for i in indices)
+
+
+class SequenceBatchSampler(Sampler):
+    """
+    Wraps SequentialSampler to yield a mini-batch of sequential
+    indices. For Kaggle RSNA2019 competition.
+
+    Args:
+        sampler (Sampler): SequentialSampler.
+    """
+
+    def __init__(self, dataset, **kwargs):
+        self.dataset = dataset
+        self.sampler = SequenceSampler(self.dataset, **kwargs)
+
+    def __iter__(self):
+        for sequence in self.sampler:
+            self.dataset.reset_sequence()
+            yield sequence
+
+    def __len__(self):
+        return len(self.sampler)
 
 
 def get_data_constants(data_root='/data', filename='datacatalog.yml'):
@@ -69,7 +115,7 @@ class RSNA2019Dataset(VisionDataset):
         'sdh': 'subdural',
     }
 
-    default_extra_fields = []
+    default_extra_fields = ['ipp_z']
 
     # [
     #     'median_ipp_z_diff_norm',
@@ -87,10 +133,15 @@ class RSNA2019Dataset(VisionDataset):
                  tta_transform=None,
                  extra_fields=None,
                  extra_datasets=None,
+                 sequence_key='series_instance_uid',
+                 sequence_order_key='ipp_z',
+                 sequence_mode=True,
                  **filter_params):
 
         self.timers = defaultdict(Timer)
         self.tta_transform = tta_transform
+        self.sequence_key = sequence_key
+        self.sequence_order_key = sequence_order_key
 
         assert reader in ['h5', 'dcm', 'memmap'], 'bad reader type'
 
@@ -125,7 +176,6 @@ class RSNA2019Dataset(VisionDataset):
                 extra_dataset_imgdir = os.path.join('/data/', dataset_dict['img_dir'])
                 extra_dataset_csv = os.path.join('/data/', dataset_dict['csv_file'])
                 df = pd.read_csv(extra_dataset_csv).set_index('ImageId')
-                print(list(df))
                 df['fullpath'] = extra_dataset_imgdir + "/" + df['filepath']
                 extra_data.append(df)
 
@@ -134,7 +184,7 @@ class RSNA2019Dataset(VisionDataset):
             random.shuffle(img_ids)
             img_ids = img_ids[:limit]
         img_ids = self.apply_filter(img_ids, **filter_params)
-        data = data.loc[img_ids]
+        data = data.loc[img_ids].sort_values([self.sequence_key, self.sequence_order_key])
 
         self.original_data_len = len(data)
 
@@ -145,13 +195,19 @@ class RSNA2019Dataset(VisionDataset):
         self.ids = {i: imgid for i, imgid in enumerate(img_ids)}
 
         self._num_images = len(self.ids)
-        self.data = data.loc[list(self.ids.values())].T.to_dict()
-
+        data = data.loc[list(self.ids.values())].copy()
         self.rev_ids = {v: k for k, v in self.ids.items()}
+
+        self.data = data.join(pd.Series(self.rev_ids, name='index'))
+
+        self.sequences = self.data.groupby(self.sequence_key)['index'].apply(list).to_dict()
 
         self.transforms_are_albumentation = isinstance(self.transforms, BaseCompose)
         self.convert_rgb = convert_rgb
         self.preprocessing = preprocessing
+
+        self.replay_params = None
+        self.sequence_mode = sequence_mode
 
     def apply_filter(self, img_ids, **filter_params):
         return img_ids
@@ -159,17 +215,28 @@ class RSNA2019Dataset(VisionDataset):
     def read_image(self, image_id):
         # TODO: Make this cleaner
         if self.reader_type == 'dcm':
-            path = self.data[image_id]['fullpath']
+            path = self.data.loc[image_id]['fullpath']
             return sitk_read_image(path)
 
         elif self.reader_type == 'h5':
-            path = self.data[image_id]['fullpath']
+            path = self.data.loc[image_id]['fullpath']
             path = os.path.splitext(path)[0] + '.h5'
             return h5_read_image(path)
 
         elif self.reader_type == 'memmap':
             assert self.reader is not None
             return self.reader[image_id]
+
+    def __super_repr__(self):
+        head = "Dataset " + self.__class__.__name__
+        body = ["Number of datapoints: {}".format(self.__len__())]
+        if self.root is not None:
+            body.append("Root location: {}".format(self.root))
+        body += self.extra_repr().splitlines()
+        # if hasattr(self, "transforms") and self.transforms is not None:
+        # body += [str(self.transforms)]
+        lines = [head] + [" " * self._repr_indent + line for line in body]
+        return '\n'.join(lines)
 
     def __repr__(self):
         body = []
@@ -178,7 +245,7 @@ class RSNA2019Dataset(VisionDataset):
         body += ["Reader: {}".format(self.reader_type)]
         body += ['Extra Fields: {}'.format(','.join(self.extra_fields))]
         lines = [" " * self._repr_indent + line for line in body]
-        lines.insert(0, super().__repr__())
+        lines.insert(0, self.__super_repr__())
         return '\n'.join(lines)
 
     def _get_extra_fields(self, image_row):
@@ -188,6 +255,9 @@ class RSNA2019Dataset(VisionDataset):
             output = {k: torch.tensor(v).float() for k, v in output.items()}
 
         return output
+
+    def reset_sequence(self):
+        self.replay_params = None
 
     def __getitem__(self, index):
         """
@@ -199,7 +269,7 @@ class RSNA2019Dataset(VisionDataset):
         """
         self.timers['getitem'].tic()
         img_id = self.ids[index]
-        image_row = self.data[img_id]
+        image_row = self.data.loc[img_id]
 
         try:
             target = [(image_row['label__' + self.label_map[c]]) for c in self.class_order]
@@ -214,7 +284,13 @@ class RSNA2019Dataset(VisionDataset):
         output = dict(image=img)
         if self.transforms is not None:
             if self.transforms_are_albumentation:
-                output = self.transforms(**output)
+
+                if self.replay_params is None or not self.sequence_mode:
+                    output = self.transforms(**output)
+                    self.replay_params = output.pop('replay', None)
+                else:
+                    output = self.transforms.replay(self.replay_params, **output)
+                    output.pop('replay', None)
             else:
                 raise NotImplementedError('Not implemented yet, must be albumentation based transform')
         self.timers['augmentation'].toc()
@@ -230,7 +306,6 @@ class RSNA2019Dataset(VisionDataset):
             self.timers['preprocessing'].tic()
             if self.preprocessing:
                 if target is not None:
-                    print(target)
                     target = torch.tensor(target).float()
                 output = self.preprocessing(**output)
             self.timers['preprocessing'].toc()
@@ -242,6 +317,7 @@ class RSNA2019Dataset(VisionDataset):
 
         output.update(self._get_extra_fields(image_row))
         self.timers['getitem'].toc()
+
         return output
 
     def __len__(self):

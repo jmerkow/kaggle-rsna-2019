@@ -19,6 +19,7 @@ from albumentations import (
     ToFloat,
     PadIfNeeded,
     Lambda,
+    ReplayCompose
 )
 from albumentations.core.transforms_interface import ImageOnlyTransform
 from albumentations.pytorch import ToTensor
@@ -200,7 +201,7 @@ def make_augmentation(data_shape,
 
     transforms.append(ToFloat(max_value=max_value))
 
-    return Compose(transforms)
+    return ReplayCompose(transforms)
 
 
 def make_transforms(data_shape, resize=None,

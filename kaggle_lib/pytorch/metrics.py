@@ -4,11 +4,11 @@ from .loss import Criterion
 
 
 class RSNA2019Metric(object):
-    image_id_key = 'image_id'
 
-    def __init__(self, classes, **kwargs):
+    def __init__(self, classes, image_id_key='image_id', **kwargs):
         kwargs['reduction'] = 'none'
         self.classes = classes
+        self.image_id_key = image_id_key
         self.criteria = Criterion(classes=classes, **kwargs)
 
     def add_batch(self, scores, target, sample):
@@ -19,7 +19,6 @@ class RSNA2019Metric(object):
             scores = {k: v.cpu().detach().numpy() for k, v in scores.items()}
         else:
             scores = scores.cpu().detach().numpy()
-
         for i, ImageId in enumerate(image_ids):
             row = {
                 'ImageId': ImageId,
