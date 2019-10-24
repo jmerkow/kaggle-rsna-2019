@@ -1,4 +1,5 @@
 # from .crf import dense_crf
+import copy
 import csv
 import hashlib
 import json
@@ -14,7 +15,7 @@ import tqdm
 import yaml
 from torch.utils.data import DataLoader
 
-from kaggle_lib.pytorch.augmentation import get_preprocessing, make_transforms
+from kaggle_lib.pytorch.augmentation import get_preprocessing
 # from kaggle_lib.pytorch.datacatalog import dataset_map, datacatalog
 from kaggle_lib.pytorch.datasets import get_dataset, get_data_constants
 from kaggle_lib.pytorch.get_model import get_model
@@ -234,7 +235,6 @@ class Ensembler(object):
         class_order = checkpoint['class_order']
 
         job_dir = os.path.dirname(os.path.dirname(model_fn))
-
         transform_params = checkpoint.get('transform', None)
         if transform_params is None:
             # get them from the yaml...
@@ -242,11 +242,10 @@ class Ensembler(object):
                 config = yaml.safe_load(f)
             transform_params = config['cfg']['data']
 
-        augmentation = transform_params['augmentation']
+        augmentation = copy.deepcopy(self.augmentation or transform_params['augmentation'])
         data_shape = transform_params['data_shape']
-
-        transforms = make_transforms(data_shape, apply_crop=True, **augmentation)
-        tta_transform = TTATransform(data_shape=data_shape, **self.tta_params)
+        augmentation.update(self.tta_params)
+        tta_transform = TTATransform(data_shape=data_shape, **augmentation)
         assert tta_transform.name == self.tta_type, 'ttas do not match'
         save_filename = "results/{dataname}/model_step{epoch:0>3}_TTA-{tta_type}.csv".format(dataname=self.dataname,
                                                                                              epoch=epoch,
@@ -278,7 +277,7 @@ class Ensembler(object):
         extra_fields = model.required_inputs
         model = model.cuda()
         model.eval()
-        loader = self.get_dataloader(transforms=transforms,
+        loader = self.get_dataloader(transforms=None,
                                      preprocessing=get_preprocessing(preprocessing, data_shape=data_shape),
                                      batch_size=batch_size, image_ids=need_write, tta_transform=tta_transform,
                                      extra_fields=extra_fields)
@@ -410,6 +409,7 @@ class Ensembler(object):
         if name is None:
             name = name_
         self.name = name
+        self.augmentation = tta_params.pop('augmentation', None)
         self.tta_params = tta_params
         self.tta_type = TTATransform(data_shape=[10, 10], **self.tta_params).name
 

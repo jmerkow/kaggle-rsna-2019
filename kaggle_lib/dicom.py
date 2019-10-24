@@ -5,6 +5,9 @@ import six
 
 window_presets = {
     # tissueType : [windowWidth, windowCenter]
+    'brain-sm': [80, 40],
+    'subdural': [200, 80],
+    'bone-sm': [380, 40],
     'soft_tissue': [350, 50],
     'bone': [1800, 400],
     'brain': [100, 30],
@@ -52,7 +55,7 @@ def window_image(data, width=None, center=None, max_value=255.0, min_value=0.0):
                         [min_value, max_value, _window])
 
 
-def windows_as_channels(data, windows, min_value=0., max_value=255.):
+def windows_as_channels(data, windows, min_value=0., max_value=255., subtract_mean=False):
     if isinstance(windows, six.string_types):
         windows = [windows]
 
@@ -68,5 +71,9 @@ def windows_as_channels(data, windows, min_value=0., max_value=255.):
             return w
 
     windows = [_get_window(w) for w in windows]
-    return np.dstack([window_image(data, width=width, center=center,
-                                   min_value=min_value, max_value=max_value) for width, center in windows])
+
+    channels = [window_image(data, width=width, center=center,
+                             min_value=min_value, max_value=max_value) for width, center in windows]
+
+    channels = np.dstack(channels)
+    return channels

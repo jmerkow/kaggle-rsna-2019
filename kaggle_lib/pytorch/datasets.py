@@ -135,7 +135,7 @@ class RSNA2019Dataset(VisionDataset):
                  extra_datasets=None,
                  sequence_key='series_instance_uid',
                  sequence_order_key='ipp_z',
-                 sequence_mode=True,
+                 sequence_mode=False,
                  **filter_params):
 
         self.timers = defaultdict(Timer)
@@ -233,8 +233,8 @@ class RSNA2019Dataset(VisionDataset):
         if self.root is not None:
             body.append("Root location: {}".format(self.root))
         body += self.extra_repr().splitlines()
-        # if hasattr(self, "transforms") and self.transforms is not None:
-        # body += [str(self.transforms)]
+        if hasattr(self, "transforms") and self.transforms is not None:
+            body += [str(self.transforms)]
         lines = [head] + [" " * self._repr_indent + line for line in body]
         return '\n'.join(lines)
 
@@ -259,6 +259,27 @@ class RSNA2019Dataset(VisionDataset):
     def reset_sequence(self):
         self.replay_params = None
 
+    def transform_image(self, image):
+
+        output = dict(image=image)
+        if self.transforms is not None:
+            if self.replay_params is None or not self.sequence_mode:
+                output = self.transforms(**output)
+                self.replay_params = output.pop('replay', None)
+            else:
+                output = self.transforms.replay(self.replay_params, **output)
+                output.pop('replay', None)
+        if self.preprocessing:
+            output = self.preprocessing(**output)
+
+        return output['image']
+
+    def transform_target(self, target=None):
+        if self.preprocessing:
+            if target is not None:
+                target = torch.tensor(target).float()
+        return target
+
     def __getitem__(self, index):
         """
         Args:
@@ -281,39 +302,20 @@ class RSNA2019Dataset(VisionDataset):
         self.timers['read_image'].toc()
 
         self.timers['augmentation'].tic()
-        output = dict(image=img)
-        if self.transforms is not None:
-            if self.transforms_are_albumentation:
-
-                if self.replay_params is None or not self.sequence_mode:
-                    output = self.transforms(**output)
-                    self.replay_params = output.pop('replay', None)
-                else:
-                    output = self.transforms.replay(self.replay_params, **output)
-                    output.pop('replay', None)
-            else:
-                raise NotImplementedError('Not implemented yet, must be albumentation based transform')
+        output = dict()
+        if self.tta_transform is not None:
+            images = self.tta_transform(img)
+            images = [self.transform_image(image) for image in images]
+            output['image'] = torch.stack(images)
+        else:
+            output['image'] = self.transform_image(img)
         self.timers['augmentation'].toc()
 
-        if self.tta_transform is not None:
-            images = self.tta_transform(output['image'])
-            images = [self.preprocessing(image=image)['image'] for image in images]
-            tmp = torch.stack(images)
-            output['image'] = tmp
-            if target is not None:
-                target = torch.tensor(target).float()
-        else:
-            self.timers['preprocessing'].tic()
-            if self.preprocessing:
-                if target is not None:
-                    target = torch.tensor(target).float()
-                output = self.preprocessing(**output)
-            self.timers['preprocessing'].toc()
+        if target is not None:
+            output['target'] = self.transform_target(target)
 
         output['index'] = index
         output['image_id'] = img_id
-        if target is not None:
-            output['target'] = target
 
         output.update(self._get_extra_fields(image_row))
         self.timers['getitem'].toc()
