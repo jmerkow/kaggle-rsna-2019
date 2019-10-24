@@ -79,7 +79,7 @@ class ClassifierTrainer(object):
             'data_root': '/data/',
             'augmentation': {'resize': 'auto'},
             'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
-            'filter': {},
+            'filter': {'positive_series_only': False},
             'reader': 'h5',
             'pin_memory': True,
             'extra_datasets': None,
@@ -315,10 +315,10 @@ class ClassifierTrainer(object):
 
         logger.info('====DATA====')
         logger.info('TRAINING')
-        logger.info(str(train_dataset))
+        logger.info(str(train_dataset) + '\n')
 
         logger.info('VALIDATION')
-        logger.info(str(val_dataset))
+        logger.info(str(val_dataset) + '\n')
 
         self.val_loader = None
         if not self.sequence_mode:

@@ -183,13 +183,16 @@ class RSNA2019Dataset(VisionDataset):
         if limit:
             random.shuffle(img_ids)
             img_ids = img_ids[:limit]
-        img_ids = self.apply_filter(img_ids, **filter_params)
         data = data.loc[img_ids].sort_values([self.sequence_key, self.sequence_order_key])
 
         self.original_data_len = len(data)
 
         if extra_data:
             data = pd.concat([data] + extra_data, sort=True)
+
+        self.extra_data_count = self.original_data_len - len(data)
+
+        data = self.apply_filter(data, **filter_params)
 
         img_ids = data.index.tolist()
         self.ids = {i: imgid for i, imgid in enumerate(img_ids)}
@@ -209,8 +212,15 @@ class RSNA2019Dataset(VisionDataset):
         self.replay_params = None
         self.sequence_mode = sequence_mode
 
-    def apply_filter(self, img_ids, **filter_params):
-        return img_ids
+    def apply_filter(self, data, positive_series_only=False):
+        if positive_series_only:
+            total = len(data)
+            seq_with_any = (data.groupby(self.sequence_key)['label__any'].max().to_frame()
+                            .query('label__any>0').index.tolist())
+            data = data[data[self.sequence_key].isin(seq_with_any)].copy()
+            print('postive series filter: {} -> {}'.format(total, len(data)))
+
+        return data
 
     def read_image(self, image_id):
         # TODO: Make this cleaner
@@ -233,17 +243,21 @@ class RSNA2019Dataset(VisionDataset):
         if self.root is not None:
             body.append("Root location: {}".format(self.root))
         body += self.extra_repr().splitlines()
-        if hasattr(self, "transforms") and self.transforms is not None:
-            body += [str(self.transforms)]
         lines = [head] + [" " * self._repr_indent + line for line in body]
         return '\n'.join(lines)
 
     def __repr__(self):
         body = []
-        body += ["Original Data Count: {}, Extra Data Count: {}".format(self.original_data_len,
-                                                                        self._num_images - self.original_data_len)]
+        body += ["Original Data Count: {}, Amount Extra Data: {}, Final (Filtered) Data Count: {}".format(
+            self.original_data_len,
+            self.extra_data_count,
+            self._num_images)]
         body += ["Reader: {}".format(self.reader_type)]
         body += ['Extra Fields: {}'.format(','.join(self.extra_fields))]
+
+        if hasattr(self, "transforms") and self.transforms is not None:
+            body += ['Transform:', '\n'.join([" " * self._repr_indent + s for s in str(self.transforms).split('\n')])]
+
         lines = [" " * self._repr_indent + line for line in body]
         lines.insert(0, self.__super_repr__())
         return '\n'.join(lines)
