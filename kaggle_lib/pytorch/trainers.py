@@ -59,6 +59,7 @@ class ClassifierTrainer(object):
             'weights': None,
             'classifier': 'basic',
             'final_output': 'final',
+            'preprocessing': True
         },
         'data': {
             'dataset': 'rsna2019-stage1',
@@ -83,6 +84,9 @@ class ClassifierTrainer(object):
             'pin_memory': True,
             'extra_datasets': None,
             'sequence_mode': False,
+            'window_max_value': 255.0,
+            'channel_mean_shift': False,
+
 
         },
         'optimization': {
