@@ -19,6 +19,142 @@ from kaggle_lib.dicom import sitk_read_image
 from kaggle_lib.pytorch.utils import Timer
 
 
+class LinearSampleScheduler(object):
+
+    def __init__(self, sampler, start_rate=None, end_rate=None, cycle_length=6, last_epoch=-1):
+        self.sampler = sampler
+        self.true_rate = self.sampler.true_rate
+        self.start_rate = start_rate if start_rate is not None else self.true_rate
+        self.end_rate = end_rate if end_rate is not None else self.true_rate
+        self.cycle_length = cycle_length
+        self.pos_freqs = np.linspace(self.start_rate, self.end_rate, self.cycle_length, endpoint=True)
+        self.last_epoch = last_epoch
+
+    def step(self, epoch=None):
+        if epoch is None:
+            self.last_epoch += 1
+        else:
+            self.last_epoch = epoch
+
+        curr_epoch = self.last_epoch
+        if self.cycle_length is not None:
+            curr_epoch = curr_epoch % self.cycle_length
+
+        curr_epoch = min(curr_epoch, len(self.pos_freqs) - 1)
+        self.sampler.pos_freq = self.pos_freqs[curr_epoch]
+
+
+class StepSampleScheduler(object):
+
+    def __init__(self, sampler, milestones=None, start_rate=None, end_rate=None, cycle_length=None, last_epoch=-1):
+        self.sampler = sampler
+        self.true_rate = self.sampler.true_rate
+        self.start_rate = start_rate if start_rate is not None else self.true_rate
+        self.end_rate = end_rate if end_rate is not None else self.true_rate
+        self.cycle_length = cycle_length
+        self.last_epoch = last_epoch
+
+        self.milestones = np.array(milestones or [])
+        self.pos_freqs = np.linspace(self.start_rate, self.end_rate, len(self.milestones) + 1, endpoint=True)
+
+    def step(self, epoch=None):
+        if epoch is None:
+            self.last_epoch += 1
+        else:
+            self.last_epoch = epoch
+
+        curr_epoch = self.last_epoch
+        if self.cycle_length is not None:
+            curr_epoch = curr_epoch % self.cycle_length
+
+        i = np.min(np.append(np.where(self.milestones > curr_epoch), np.inf))
+        if i == np.inf:
+            i = -1
+        self.sampler.pos_freq = self.pos_freqs[int(i)]
+
+
+class LabelSampler(Sampler):
+    schedulers = {
+        'linear': LinearSampleScheduler,
+        'step': StepSampleScheduler,
+    }
+
+    def _get_strata_indexes(self):
+        data = self.dataset.data
+        if self.strata == 'image':
+            pos_df_indexes = data.query("label__{}>0".format(self.label)).index.tolist()
+            neg_df_indexes = data.query("not label__{}>0".format(self.label)).index.tolist()
+
+        elif self.strata == 'seq':
+            seq_key = self.dataset.sequence_key
+            strat = data.groupby(seq_key)['label__{}'.format(self.label)].max().to_frame()
+            sp = strat.query("label__{}>0".format(self.label)).index.tolist()
+
+            pos_df_indexes = data[data[seq_key].isin(sp)].index.tolist()
+            neg_df_indexes = data[~data[seq_key].isin(sp)].index.tolist()
+        else:
+            raise NotImplementedError('strata {} not implemented'.format(self.strata))
+
+        pos_idxs = [self.dataset.rev_ids[i] for i in pos_df_indexes]
+        neg_idxs = [self.dataset.rev_ids[i] for i in neg_df_indexes]
+
+        return pos_idxs, neg_idxs
+
+    def __init__(self, dataset, last_epoch=-1,
+                 sample_mode='over',
+                 strata='image', label='any', scheduler='linear', **scheduler_params):
+
+        self.strata = strata
+        self.label = label
+        self.dataset = dataset
+
+        assert sample_mode in ['over', 'under'], 'bad sample mode'
+        self.sample_mode = sample_mode
+
+        self.pos_idxs, self.neg_idxs = self._get_strata_indexes()
+
+        self.n_positive_true = len(self.pos_idxs)
+        self.n_negative_true = len(self.neg_idxs)
+
+        self.true_rate = self.n_positive_true / (self.n_negative_true + self.n_positive_true)
+        self.scheduler = self.schedulers[scheduler](self, last_epoch=last_epoch, **scheduler_params)
+
+        self.step()
+        iter(self)
+
+    def __iter__(self):
+
+        if self.sample_mode == 'over':
+            if self.pos_freq > 0:
+                self.n_positive = int(self.n_negative_true * (self.pos_freq) / (1 - self.pos_freq))
+            else:
+                self.n_positive = 0
+            self.n_negative = self.n_negative_true
+
+            stack = np.random.choice(self.pos_idxs, size=self.n_positive, replace=len(self.pos_idxs) < self.n_positive)
+            if self.pos_freq < 1.0:
+                stack = np.hstack((stack, self.neg_idxs))
+
+        elif self.sample_mode == 'under':
+            if self.pos_freq < 1:
+                self.n_negative = int(self.n_positive_true * (1 - self.pos_freq) / self.pos_freq)
+            else:
+                self.n_negative = 0
+            self.n_positive = self.n_positive_true
+            stack = np.random.choice(self.neg_idxs, size=self.n_negative, replace=len(self.neg_idxs) < self.n_negative)
+            if self.pos_freq > 0:
+                stack = np.hstack((stack, self.pos_idxs))
+        shuffled = np.random.permutation(stack)
+        return iter(shuffled.tolist())
+
+    def step(self, epoch=None):
+        self.scheduler.step(epoch=epoch)
+
+    def __len__(self):
+
+        return self.n_positive + self.n_negative
+
+
 class SequenceSampler(Sampler):
 
     def __init__(self, dataset, shuffle=False, replacement=False):
@@ -212,14 +348,13 @@ class RSNA2019Dataset(VisionDataset):
         self.replay_params = None
         self.sequence_mode = sequence_mode
 
-    def apply_filter(self, data, positive_series_only=False):
+    def apply_filter(self, data, positive_series_only=False, **kwargs):
         if positive_series_only:
             total = len(data)
             seq_with_any = (data.groupby(self.sequence_key)['label__any'].max().to_frame()
                             .query('label__any>0').index.tolist())
             data = data[data[self.sequence_key].isin(seq_with_any)].copy()
             print('postive series filter: {} -> {}'.format(total, len(data)))
-
         return data
 
     def read_image(self, image_id):
