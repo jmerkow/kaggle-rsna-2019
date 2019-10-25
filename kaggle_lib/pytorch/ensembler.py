@@ -246,7 +246,8 @@ class Ensembler(object):
         data_shape = transform_params['data_shape']
         augmentation.update(self.tta_params)
         tta_transform = TTATransform(data_shape=data_shape, **augmentation)
-        assert tta_transform.name == self.tta_type, 'ttas do not match'
+        assert tta_transform.name == self.tta_type, 'ttas do not match {} vs {}'.format(tta_transform.name,
+                                                                                        self.tta_type)
         save_filename = "results/{dataname}/model_step{epoch:0>3}_TTA-{tta_type}.csv".format(dataname=self.dataname,
                                                                                              epoch=epoch,
                                                                                              tta_type=self.tta_type)

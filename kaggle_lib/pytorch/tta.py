@@ -123,7 +123,8 @@ class RandomTTA(DualTransform):
 
 class TTATransform(object):
 
-    def __init__(self, hflip=False, five_crop=False, scales=None, angles=None, data_shape=(224, 224), random_count=0,
+    def __init__(self, hflip_tta=False, five_crop=False, scales=None, angles=None, data_shape=(224, 224),
+                 random_count=0,
                  resize=None,
                  windows=('soft_tissue',),
                  windows_force_rgb=True,
@@ -148,7 +149,7 @@ class TTATransform(object):
         scales = scales or []
         angles = angles or []
 
-        if hflip and not random_count:
+        if hflip_tta and not random_count:
             self.transforms.append(HorizontalFlipTTA())
 
         if scales:
@@ -161,7 +162,6 @@ class TTATransform(object):
             self.transforms.append(FourCropTTA(*data_shape))
 
         if random_count:
-            random_augmentations['hflip'] = hflip
             random_augmentations['border_mode'] = border_mode
             self.transforms.append(RandomTTA(data_shape, random_count, augmentation=random_augmentations))
 
