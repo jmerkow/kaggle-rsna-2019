@@ -73,6 +73,7 @@ class ClassifierTrainer(object):
             'random_split_state': None,
             'random_split_stratified': None,
             'random_split_group': 'sop_instance_uid',
+            'random_stratifier': 'label__any',
             'batch_size': 32,
             'max_images_per_card': None,
             'num_workers': 2,
@@ -81,7 +82,7 @@ class ClassifierTrainer(object):
             'data_root': '/data/',
             'augmentation': {'resize': 'auto'},
             'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
-            'filter': {'positive_series_only': False},
+            'filter': {'positive_series_only': False, 'neg_from_neg_series': False, 'apply_to_val': False},
             'reader': 'h5',
             'pin_memory': True,
             'extra_datasets': None,
@@ -239,6 +240,7 @@ class ClassifierTrainer(object):
         random_split_group = data_params['random_split_group']
         random_split_state = data_params['random_split_state']
         random_split_stratified = data_params['random_split_stratified']
+        random_stratifier = data_params['random_stratifier']
 
         extra_datasets = data_params.pop('extra_datasets', None)
 
@@ -287,11 +289,12 @@ class ClassifierTrainer(object):
             train_img_ids, val_img_ids = rsna2019_split(csv_file=csv_file, group_on=random_split_group,
                                                         n_splits=n_splits, fold=fold,
                                                         random_state=random_split_state,
-                                                        stratified=random_split_stratified)
+                                                        stratified=random_split_stratified,
+                                                        stratifier=random_stratifier)
             logger.info(
                 "Using Random Split! n_splits: %d, fold: %d, random_state: %s", n_splits, fold, str(random_split_state))
 
-        apply_filter_to_val = filter_params.pop('apply_to_val', True)
+        apply_filter_to_val = filter_params.pop('apply_to_val', False)
 
         if apply_filter_to_val:
             val_filter_params = deepcopy(filter_params)
