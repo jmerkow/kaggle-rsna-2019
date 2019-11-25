@@ -349,8 +349,9 @@ class RSNA2019Dataset(VisionDataset):
         self.sequence_mode = sequence_mode
 
     def apply_filter(self, data, positive_series_only=False, neg_from_neg_series=False, **kwargs):
+        total = len(data)
         if positive_series_only or neg_from_neg_series:
-            total = len(data)
+
             seq_with_any = (data.groupby(self.sequence_key)['label__any'].max().to_frame()
                             .query('label__any>0').index.tolist())
 
@@ -361,7 +362,7 @@ class RSNA2019Dataset(VisionDataset):
                 data['seq_label_any'] = data[self.sequence_key].isin(seq_with_any)
                 data = data.query('(seq_label_any>0 and label__any>0) or seq_label_any == 0')
 
-            print('postive series filter: {} -> {}'.format(total, len(data)))
+        print('filter: {} -> {}'.format(total, len(data)))
         return data
 
     def read_image(self, image_id):

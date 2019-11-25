@@ -57,10 +57,15 @@ def is_model_dict(d):
     return 'model_fn' in d
 
 
-def get_ensemble_name(dirs):
+def get_ensemble_name(dirs, weights=None):
     hasher = hashlib.md5()
     for fn in dirs:
         hasher.update(fn.encode())
+
+    if weights is not None:
+        for k, v in sorted(weights.items()):
+            hasher.update(str(k).encode())
+            hasher.update(str(v).encode())
     h = hasher.hexdigest()[:6]
     return str(h)
 
