@@ -72,10 +72,13 @@ class Criterion(object):
             metrics.update({'loss-{}'.format(cl_name): l.cpu().detach().numpy()
                             for cl_name, l in zip(self.classes, criterion.raw_loss.T)})
             del criterion.raw_loss
+            self.losses.append(loss)
 
         return metrics
 
     def backward(self):
+        # torch.stack(self.losses).sum().backward()
+
         for loss in self.losses:
             loss.backward(retain_graph=True)
 

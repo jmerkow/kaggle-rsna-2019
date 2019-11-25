@@ -1,6 +1,8 @@
 from albumentations import HorizontalFlip, DualTransform
 from albumentations.augmentations import functional as F
 
+from .augmentation import make_augmentation, make_transforms
+
 
 class TTAAlbumentationMixin(object):
     def __call__(self, *args, **kwargs):
@@ -96,15 +98,58 @@ class ScaleTTA(DualTransform):
         raise NotImplementedError('later')
 
 
+class RandomTTA(DualTransform):
+    def __init__(self, data_shape, count=1, always_apply=False, p=1.0, augmentation=None):
+        super(RandomTTA, self).__init__(always_apply, p)
+        self.data_shape = data_shape
+        self.count = count
+        augmentation = augmentation or {}
+        self.augmentation = augmentation
+        self._transform = make_augmentation(data_shape, tta_mode=True, **self.augmentation)
+
+    def apply(self, img, **params):
+        return [self._transform(image=img)['image'] for _ in range(self.count)]
+
+    def get_transform_init_args_names(self):
+        return ("data_shape", 'count', 'augmentation')
+
+    def __str__(self):
+        return "{}{}".format('rand', self.count)
+
+    def __repr__(self):
+        rep = super().__repr__() + '\n' + repr(self._transform)
+        return rep
+
+
 class TTATransform(object):
 
-    def __init__(self, hflip=False, five_crop=False, scales=None, angles=None, data_shape=(224, 224)):
+    def __init__(self, hflip_tta=False, five_crop=False, scales=None, angles=None, data_shape=(224, 224),
+                 random_count=0,
+                 resize=None,
+                 windows=('soft_tissue',),
+                 windows_force_rgb=True,
+                 max_value=1.0,
+                 window_max_value=255,
+                 channel_mean_shift=False,
+                 border_mode=0,
+                 **random_augmentations,
+
+                 ):
+
+        self.preprocess = make_transforms(data_shape,
+                                          resize=resize, windows=windows,
+                                          windows_force_rgb=windows_force_rgb,
+                                          window_max_value=window_max_value,
+                                          channel_mean_shift=channel_mean_shift,
+                                          max_value=1.0,
+                                          apply_crop=False,
+                                          )
 
         self.transforms = []
         scales = scales or []
         angles = angles or []
 
-        if hflip:
+        if hflip_tta and not random_count:
             self.transforms.append(HorizontalFlipTTA())
 
         if scales:
@@ -116,6 +161,10 @@ class TTATransform(object):
         if five_crop:
             self.transforms.append(FourCropTTA(*data_shape))
 
+        if random_count:
+            random_augmentations['border_mode'] = border_mode
+            self.transforms.append(RandomTTA(data_shape, random_count, augmentation=random_augmentations))
+
     @property
     def name(self):
         if len(self.transforms):
@@ -126,7 +175,7 @@ class TTATransform(object):
         return self.name
 
     def __call__(self, image):
-        images = [image]
+        images = [self.preprocess(image=image)['image']]
         for t in self.transforms:
             images += sum([t(image=i)['image'] for i in images], [])
         return images

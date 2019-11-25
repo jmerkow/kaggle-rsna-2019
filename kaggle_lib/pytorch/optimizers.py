@@ -1,53 +1,79 @@
-import itertools as it
 import math
+from collections import defaultdict
 
 import torch
+from torch.optim import Optimizer
 
 
-# TODO: add citation, and give credit to whom ever wrote these if not us
+# https://github.com/alphadl/lookahead.pytorch
 
-class Lookahead(torch.optim.Optimizer):
-    '''
-    https://github.com/lonePatient/lookahead_pytorch
-    '''
-
-    def __init__(self, base_optimizer, alpha=0.5, k=5):
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError(f'Invalid slow update rate: {alpha}')
-        if not 1 <= k:
-            raise ValueError(f'Invalid lookahead steps: {k}')
-        self.optimizer = base_optimizer
-        self.param_groups = self.optimizer.param_groups
-        self.alpha = alpha
+class Lookahead(Optimizer):
+    def __init__(self, optimizer, alpha=0.5, k=5):
+        self.optimizer = optimizer
         self.k = k
+        self.alpha = alpha
+        self.param_groups = self.optimizer.param_groups
+        self.state = defaultdict(dict)
+        # defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.fast_state = self.optimizer.state
         for group in self.param_groups:
-            group["step_counter"] = 0
+            group["counter"] = 0
 
-        self.slow_weights = None
+    def update(self, group):
+        for fast in group["params"]:
+            param_state = self.state[fast]
+            if "slow_param" not in param_state:
+                param_state["slow_param"] = torch.zeros_like(fast.data)
+                param_state["slow_param"].copy_(fast.data)
+            slow = param_state["slow_param"]
+            slow += (fast.data - slow) * self.alpha
+            fast.data.copy_(slow)
 
-    def _setup_slow_weights(self):
-        if self.slow_weights is None:
-            self.slow_weights = [[p.clone().detach() for p in group['params']]
-                                 for group in self.param_groups]
-            for w in it.chain(*self.slow_weights):
-                w.requires_grad = False
+    def update_lookahead(self):
+        for group in self.param_groups:
+            self.update(group)
 
     def step(self, closure=None):
-        self._setup_slow_weights()
-        # loss = None
-        # if closure is not None:
-        #     loss = closure()
-        loss = self.optimizer.step(closure=closure)
-        for group, slow_weights in zip(self.param_groups, self.slow_weights):
-            group['step_counter'] += 1
-            if group['step_counter'] % self.k != 0:
-                continue
-            for p, q in zip(group['params'], slow_weights):
-                if p.grad is None:
-                    continue
-                q.data.add_(self.alpha, p.data - q.data)
-                p.data.copy_(q.data)
+        loss = self.optimizer.step(closure)
+        for group in self.param_groups:
+            if group["counter"] == 0:
+                self.update(group)
+            group["counter"] += 1
+            if group["counter"] >= self.k:
+                group["counter"] = 0
         return loss
+
+    def state_dict(self):
+        fast_state_dict = self.optimizer.state_dict()
+        slow_state = {
+            (id(k) if isinstance(k, torch.Tensor) else k): v
+            for k, v in self.state.items()
+        }
+        fast_state = fast_state_dict["state"]
+        param_groups = fast_state_dict["param_groups"]
+        return {
+            "fast_state": fast_state,
+            "slow_state": slow_state,
+            "param_groups": param_groups,
+        }
+
+    def load_state_dict(self, state_dict):
+        slow_state_dict = {
+            "state": state_dict["slow_state"],
+            "param_groups": state_dict["param_groups"],
+        }
+        fast_state_dict = {
+            "state": state_dict["fast_state"],
+            "param_groups": state_dict["param_groups"],
+        }
+        super(Lookahead, self).load_state_dict(slow_state_dict)
+        self.optimizer.load_state_dict(fast_state_dict)
+        self.fast_state = self.optimizer.state
+
+    def add_param_group(self, param_group):
+        param_group["counter"] = 0
+        self.optimizer.add_param_group(param_group)
+
 
 
 class RAdam(torch.optim.Optimizer):

@@ -13,11 +13,14 @@ import torch.optim
 import yaml
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
+# from .datacatalog import dataset_map, datacatalog
+from torch.utils.data.sampler import RandomSampler
 from torchnet.meter import AverageValueMeter
 from tqdm import tqdm
 
+from kaggle_lib.pytorch.datasets import get_csv_file, get_dataset, get_data_constants, SequenceBatchSampler, \
+    LabelSampler
 from .augmentation import make_augmentation, make_transforms, get_preprocessing
-from .datacatalog import get_dataset, dataset_map, datacatalog, get_csv_file
 from .get_model import get_model
 from .loss import Criterion
 from .lr_scheduler import get_scheduler
@@ -58,6 +61,7 @@ class ClassifierTrainer(object):
             'weights': None,
             'classifier': 'basic',
             'final_output': 'final',
+            'preprocessing': True
         },
         'data': {
             'dataset': 'rsna2019-stage1',
@@ -69,6 +73,7 @@ class ClassifierTrainer(object):
             'random_split_state': None,
             'random_split_stratified': None,
             'random_split_group': 'sop_instance_uid',
+            'random_stratifier': 'label__any',
             'batch_size': 32,
             'max_images_per_card': None,
             'num_workers': 2,
@@ -77,9 +82,14 @@ class ClassifierTrainer(object):
             'data_root': '/data/',
             'augmentation': {'resize': 'auto'},
             'classes': ('sdh', 'sah', 'ivh', 'iph', 'edh', 'any'),
-            'filter': {},
+            'filter': {'positive_series_only': False, 'neg_from_neg_series': False, 'apply_to_val': False},
             'reader': 'h5',
             'pin_memory': True,
+            'extra_datasets': None,
+            'sequence_mode': False,
+            'window_max_value': 255.0,
+            'channel_mean_shift': False,
+
 
         },
         'optimization': {
@@ -146,6 +156,7 @@ class ClassifierTrainer(object):
         self.setup()
 
         self.start_epoch = 0
+        self.global_step = 0
         self.try_resume()
 
     def try_resume(self):
@@ -221,12 +232,17 @@ class ClassifierTrainer(object):
         filter_params = data_params['filter']
         num_workers = data_params['num_workers']
 
+        self.sequence_mode = data_params['sequence_mode']
+
         random_split = data_params['random_split']
         n_splits = data_params['n_splits']
         fold = data_params['fold']
         random_split_group = data_params['random_split_group']
         random_split_state = data_params['random_split_state']
         random_split_stratified = data_params['random_split_stratified']
+        random_stratifier = data_params['random_stratifier']
+
+        extra_datasets = data_params.pop('extra_datasets', None)
 
         reader = data_params['reader']
         val_reader = data_params.get('reader', reader)
@@ -255,6 +271,7 @@ class ClassifierTrainer(object):
         self.test_transforms = make_transforms(self.data_shape, **augmentation)
         self.transform_args = dict(data_shape=self.data_shape, augmentation=augmentation)
 
+        datacatalog, dataset_map = get_data_constants(self.data_root)
         train_dataset_name, val_dataset_name = dataset_map[self.dataset]['train'], dataset_map[dataset]['val']
 
         train_catalog = datacatalog[train_dataset_name]
@@ -272,11 +289,12 @@ class ClassifierTrainer(object):
             train_img_ids, val_img_ids = rsna2019_split(csv_file=csv_file, group_on=random_split_group,
                                                         n_splits=n_splits, fold=fold,
                                                         random_state=random_split_state,
-                                                        stratified=random_split_stratified)
+                                                        stratified=random_split_stratified,
+                                                        stratifier=random_stratifier)
             logger.info(
                 "Using Random Split! n_splits: %d, fold: %d, random_state: %s", n_splits, fold, str(random_split_state))
 
-        apply_filter_to_val = filter_params.pop('apply_to_val', True)
+        apply_filter_to_val = filter_params.pop('apply_to_val', False)
 
         if apply_filter_to_val:
             val_filter_params = deepcopy(filter_params)
@@ -287,6 +305,7 @@ class ClassifierTrainer(object):
                                     preprocessing=get_preprocessing(self.model_preprocessing),
                                     img_ids=train_img_ids, class_order=self.classes, reader=reader,
                                     extra_fields=self.required_inputs,
+                                    extra_datasets=extra_datasets,
                                     **filter_params)
         val_dataset = get_dataset(val_catalog, self.data_root, transforms=self.val_transforms,
                                   preprocessing=get_preprocessing(self.model_preprocessing),
@@ -302,18 +321,35 @@ class ClassifierTrainer(object):
 
         logger.info('====DATA====')
         logger.info('TRAINING')
-        logger.info(str(train_dataset))
+        logger.info(str(train_dataset) + '\n')
 
         logger.info('VALIDATION')
-        logger.info(str(val_dataset))
+        logger.info(str(val_dataset) + '\n')
 
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                                       num_workers=num_workers, pin_memory=pin_memory)
-        if val_dataset is not None:
-            self.val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4, drop_last=False,
-                                         pin_memory=pin_memory)
+        self.val_loader = None
+        if not self.sequence_mode:
+
+            sampler_params = data_params['sampler']
+
+            self.sampler = None
+            if sampler_params is not None:
+                self.sampler = sampler = LabelSampler(train_dataset, **sampler_params)
+            else:
+                sampler = RandomSampler(train_dataset)
+
+            self.train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler,
+                                           num_workers=num_workers, pin_memory=pin_memory)
+            if val_dataset is not None:
+                self.val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4, drop_last=False,
+                                             pin_memory=pin_memory)
         else:
-            self.val_loader = None
+            self.train_loader = DataLoader(train_dataset,
+                                           batch_sampler=SequenceBatchSampler(train_dataset, shuffle=True),
+                                           num_workers=num_workers, pin_memory=pin_memory)
+            if val_dataset is not None:
+                self.val_loader = DataLoader(val_dataset,
+                                             batch_sampler=SequenceBatchSampler(val_dataset, shuffle=False),
+                                             num_workers=4, pin_memory=pin_memory)
 
         self.iters_in_epoch = len(self.train_loader)
 
@@ -433,8 +469,14 @@ class ClassifierTrainer(object):
         last_step = 0
         num_img_tr = len(self.train_loader)
         tdl = iter(self.train_loader)
-        tbar = tqdm(list(range(num_img_tr)), desc='Epoch {} Train'.format(epoch), file=sys.stdout)
+        steps_per_epoch = len(tdl)
+        tbar = tqdm(list(range(steps_per_epoch)), desc='Epoch {} Train'.format(epoch), file=sys.stdout)
         local_timers = self.train_timers
+
+        epoch_timer = Timer()
+        epoch_timer.tic()
+
+
 
         for i in tbar:
             local_timers['iter'].tic()
@@ -446,6 +488,11 @@ class ClassifierTrainer(object):
             metrics = {}
             for lri, lr in enumerate([p['lr'] for p in self.optimizer.param_groups]):
                 metrics['lr-{}'.format(lri)] = lr
+
+            num_images = len(sample["target"])
+            for li, l in enumerate(self.classes):
+                metrics['n-label-{}'.format(l)] = \
+                    np.count_nonzero(sample["target"].cpu().detach().numpy()[:, li]) / num_images
 
             local_timers['to_cuda'].tic()
             image = sample.pop('image').cuda()
@@ -465,10 +512,10 @@ class ClassifierTrainer(object):
             self.criterion.backward()
             local_timers['backward'].toc()
 
+            epoch_dec = epoch + i / steps_per_epoch
             if (i + 1) % self.step_size == 0:
                 local_timers['step'].tic()
                 last_step = i
-                epoch_dec = epoch + i / self.steps_per_epoch
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 if self.lr_scheduler is not None and self.lr_step_on_iter:
@@ -487,11 +534,12 @@ class ClassifierTrainer(object):
                     write_name = 'train/{}'.format(name) \
                         if not name.startswith('time-') else 'timer/train/{}'.format(name.replace('time-', ''))
 
-                    self.summary.add_scalar(write_name, intra_epoch_meters[name].mean, step)
+                    self.summary.add_scalar(write_name, intra_epoch_meters[name].mean, self.global_step)
                     intra_epoch_meters[name].reset()
 
             s = self._format_logs(logs)
             tbar.set_postfix_str(s)
+            self.global_step += 1
 
         if last_step != i:
             self.optimizer.step()
@@ -499,6 +547,9 @@ class ClassifierTrainer(object):
             if self.lr_scheduler is not None and self.lr_step_on_iter:
                 step_epoch = epoch if self.scheduler_pass_epoch else None
                 self.lr_scheduler.step(step_epoch)
+
+        epoch_timer.toc()
+        self.summary.add_scalar('timer-epoch/train-total', epoch_timer.total_time, epoch + 1)
 
         for name, value in logs.items():
             write_name = 'train-epoch/mean-{}'.format(name) \
@@ -526,6 +577,8 @@ class ClassifierTrainer(object):
         tbar = tqdm(self.val_loader, desc='Epoch {} Validate'.format(epoch), file=sys.stdout)
         self.val_metrics.reset()
         self.model.eval()
+        epoch_timer = Timer()
+        epoch_timer.tic()
         with torch.no_grad():
             for i, sample in enumerate(tbar):
                 image = sample.pop('image').cuda()
@@ -551,6 +604,8 @@ class ClassifierTrainer(object):
         logger.info('[Epoch: %d, numImages: %5d, Thresholds: %d] Validation scores: %s', epoch + 1,
                     i + 1, len(self.val_metrics.rows), s)
         logs['scorecard'] = self.val_metrics.get_rows()
+        epoch_timer.toc()
+        self.summary.add_scalar('timer-epoch/validation-total', epoch_timer.total_time, epoch + 1)
         # logs['best'] = best
         self.val_metrics.reset()
         return logs
@@ -569,6 +624,12 @@ class ClassifierTrainer(object):
         self.model = self.model.cuda()
 
         for epoch in range(self.start_epoch, self.epochs):
+            timer = Timer()
+            timer.tic()
+
+            if self.sampler is not None:
+                self.sampler.step(epoch)
+
             train_logs = self.step_epoch(epoch)
             val_logs = self.validation(epoch)
             curr_score = val_logs[self.best_metric]
@@ -585,10 +646,13 @@ class ClassifierTrainer(object):
             val_loss = val_logs['loss']
             if self.plateau_scheduler is not None:
                 self.plateau_scheduler.step(val_loss)
+
             if self.stopper is not None:
                 self.stopper.step(val_loss)
                 if self.stopper.stop:
                     break
+            timer.toc()
+            self.summary.add_scalar('timer-epoch/total', timer.total_time, epoch + 1)
 
         return train_logs, val_logs
 
@@ -623,6 +687,7 @@ class ClassifierTrainer(object):
                  'model_params': self.model_params,
                  'class_order': self.classes,
                  'final_output': self.final_output,
+                 'global_step': self.global_step,
                  }
 
         if self.lr_scheduler is not None:
@@ -658,6 +723,7 @@ class ClassifierTrainer(object):
         self.prev_score = state['score']
         self.model.load_state_dict(state['state_dict'])
         self.optimizer.load_state_dict(state['optimizer'])
+        self.global_step = state.get('global_step', self.steps_per_epoch * self.start_epoch)
 
         if self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(state['lr_scheduler'])
