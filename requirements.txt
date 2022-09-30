@@ -6,7 +6,7 @@ torch>=1.1.0
 numpy
 torchnet
 tensorboardX
-joblib==0.13.2
+joblib==1.2.0
 
 --trusted-host www.simpleitk.org
 --find-links http://www.simpleitk.org/SimpleITK/resources/software.html
